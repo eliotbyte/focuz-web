@@ -273,6 +273,8 @@ function App() {
         const id = await getCurrentSpaceId()
         setCurrentSpaceId(id)
         await runSync()
+        // Safety: run one more shortly after to catch concurrent pushes from other clients
+        setTimeout(() => { runSync() }, 1000)
       })
       const { kick } = scheduleAutoSync()
       const onLocalWrite = () => kick()

@@ -2,7 +2,7 @@ import { db, getKV, setKV, wipeLocalData } from './db'
 import type { FilterRecord, NoteRecord, SpaceRecord, TagRecord } from './types'
 
 const API_BASE = (import.meta as any).env.VITE_API_BASE_URL as string | undefined
-const SYNC_INTERVAL_MS = 5 * 60 * 1000
+const SYNC_INTERVAL_MS = 5 * 1000
 const LAST_SYNC_KV = 'lastSyncAt'
 const CURRENT_SPACE_KV = 'currentSpaceId'
 const TOKEN_KV = 'authToken'
@@ -206,6 +206,16 @@ async function pushDirty() {
       if (m.resource === 'note' || m.resource === 'notes') {
         const local = await db.notes.where('clientId').equals(m.clientId).first()
         if (local) await db.notes.update(local.id!, { serverId: m.serverId })
+        // Deduplicate: if multiple notes now share the same serverId, keep the one with a clientId (local) if exists
+        const withSame = await db.notes.where('serverId').equals(m.serverId).toArray()
+        if (withSame.length > 1) {
+          const keep = withSame.find(n => !!n.clientId) ?? withSame[0]
+          for (const x of withSame) {
+            if (x.id !== keep.id) {
+              await db.notes.delete(x.id!)
+            }
+          }
+        }
       }
     }
   })
@@ -216,9 +226,16 @@ async function pushDirty() {
 async function pullSince() {
   if (!navigator.onLine || !API_BASE || !getAuthToken()) return { pulled: 0 }
   const since = (await getKV<string>(LAST_SYNC_KV, '1970-01-01T00:00:00Z'))!
-  const now = new Date().toISOString()
   const resp = await api(`/sync?since=${encodeURIComponent(since)}`)
   const data = resp?.data || {}
+
+  // Advance checkpoint only to the max server modified_at we actually saw
+  let maxSyncAt = since
+  const updateMax = (iso?: string) => { if (iso && iso > maxSyncAt) maxSyncAt = iso }
+  for (const s of (data.spaces ?? [])) updateMax(s.modified_at)
+  for (const n of (data.notes ?? [])) updateMax(n.modified_at)
+  for (const t of (data.tags ?? [])) updateMax(t.modified_at ?? t.created_at)
+  for (const f of (data.filters ?? [])) updateMax(f.modified_at)
 
   let pulled = 0
   await db.transaction('rw', db.spaces, db.notes, db.tags, db.filters, async () => {
@@ -240,11 +257,15 @@ async function pullSince() {
 
     for (const n of (data.notes ?? [])) {
       pulled++
-      const existing = await db.notes.where('serverId').equals(n.id!).first()
+      let existing = await db.notes.where('serverId').equals(n.id!).first()
+      if (!existing && n.clientId) {
+        // try match by clientId if provided from server (conflict/mapping echo)
+        existing = await db.notes.where('clientId').equals(n.clientId).first()
+      }
       const rec: NoteRecord = {
         id: existing?.id,
         serverId: n.id ?? null,
-        clientId: existing?.clientId ?? null,
+        clientId: existing?.clientId ?? n.clientId ?? null,
         spaceId: (await db.spaces.where('serverId').equals(n.space_id).first())?.id!,
         title: null,
         text: n.text ?? '',
@@ -295,18 +316,41 @@ async function pullSince() {
     }
   })
 
-  await setKV(LAST_SYNC_KV, now)
+  // Only move forward to what the server told us exists. If nothing new, keep since unchanged.
+  // Use a small overlap window (1ms) because server uses strict '>' comparison.
+  const nextSince = (() => {
+    try {
+      const t = Date.parse(maxSyncAt)
+      if (Number.isFinite(t)) return new Date(t - 1).toISOString()
+    } catch {}
+    return maxSyncAt
+  })()
+  await setKV(LAST_SYNC_KV, nextSince)
   return { pulled }
 }
 
 let syncTimer: number | undefined
+let ws: WebSocket | null = null
+let wsRetryMs = 1000
+let syncRunning = false
+let syncQueued = false
 
 export async function runSync(): Promise<void> {
+  if (syncRunning) { syncQueued = true; return }
+  syncRunning = true
   try {
     await pushDirty()
     await pullSince()
   } catch (e) {
     console.debug('sync error', e)
+  } finally {
+    syncRunning = false
+    if (syncQueued) {
+      syncQueued = false
+      // run again immediately to process any events queued during the last run
+      // avoid stack growth
+      setTimeout(() => runSync(), 0)
+    }
   }
 }
 
@@ -317,12 +361,39 @@ export function scheduleAutoSync() {
   }
 
   window.addEventListener('online', () => runSync())
-  window.addEventListener('focus', () => runSync())
+  window.addEventListener('focus', () => { runSync(); kick() })
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') runSync()
+    if (document.visibilityState === 'visible') { runSync(); kick() }
   })
 
   setInterval(() => runSync(), SYNC_INTERVAL_MS)
+
+  // Best-effort websocket to get nudges from server when other sessions push
+  const connectWS = () => {
+    try {
+      if (!API_BASE) return
+      const token = getAuthToken()
+      if (!token) return
+      const url = new URL(API_BASE)
+      const wsProto = url.protocol === 'https:' ? 'wss:' : 'ws:'
+      const wsUrl = `${wsProto}//${url.host}/ws?token=${encodeURIComponent(token)}`
+      ws = new WebSocket(wsUrl, [])
+      ws.onopen = () => { wsRetryMs = 1000 }
+      ws.onmessage = () => { runSync() }
+      ws.onclose = () => {
+        ws = null
+        setTimeout(connectWS, wsRetryMs)
+        wsRetryMs = Math.min(wsRetryMs * 2, 30000)
+      }
+      ws.onerror = () => { try { ws?.close() } catch {} }
+      // Attach token via header is not possible in browser WS; fallback to bearer via initial HTTP group auth.
+      // Since /ws is under auth group, ensure the app uses an auth-bearing cookie or proxy. If not, ignore silently.
+    } catch {
+      setTimeout(connectWS, wsRetryMs)
+      wsRetryMs = Math.min(wsRetryMs * 2, 30000)
+    }
+  }
+  connectWS()
   return { kick }
 }
 
