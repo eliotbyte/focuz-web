@@ -6,6 +6,48 @@ const SYNC_INTERVAL_MS = 5 * 1000
 const LAST_SYNC_KV = 'lastSyncAt'
 const CURRENT_SPACE_KV = 'currentSpaceId'
 const TOKEN_KV = 'authToken'
+const USERNAME_LS = 'authUsername'
+const AUTH_REQUIRED_LS = 'authRequired'
+
+let authRequired = false
+let authBC: BroadcastChannel | null = null
+try {
+  authBC = new BroadcastChannel('focuz-auth')
+} catch {}
+
+function emitAuthRequired(next: boolean) {
+  authRequired = next
+  try { localStorage.setItem(AUTH_REQUIRED_LS, next ? '1' : '0') } catch {}
+  try { window.dispatchEvent(new CustomEvent('focuz:auth-required', { detail: next })) } catch {}
+  try { authBC?.postMessage({ type: 'auth-required', value: next }) } catch {}
+}
+
+export function isAuthRequired(): boolean {
+  return authRequired || (typeof localStorage !== 'undefined' && localStorage.getItem(AUTH_REQUIRED_LS) === '1')
+}
+
+export function onAuthRequired(handler: (required: boolean) => void): () => void {
+  const fn = (e: Event) => {
+    const required = (e as CustomEvent<boolean>).detail
+    handler(!!required)
+  }
+  const storageFn = (e: StorageEvent) => {
+    if (e.key === AUTH_REQUIRED_LS) handler(e.newValue === '1')
+  }
+  const bcFn = (msg: MessageEvent) => {
+    if (msg?.data?.type === 'auth-required') handler(!!msg.data.value)
+  }
+  window.addEventListener('focuz:auth-required', fn as EventListener)
+  window.addEventListener('storage', storageFn)
+  authBC?.addEventListener('message', bcFn)
+  // fire current state immediately
+  handler(isAuthRequired())
+  return () => {
+    window.removeEventListener('focuz:auth-required', fn as EventListener)
+    window.removeEventListener('storage', storageFn)
+    try { authBC?.removeEventListener('message', bcFn) } catch {}
+  }
+}
 
 function getAuthToken(): string | undefined {
   try {
@@ -15,13 +57,29 @@ function getAuthToken(): string | undefined {
   }
 }
 
+function getLastUsernameLS(): string | undefined {
+  try { return localStorage.getItem(USERNAME_LS) ?? undefined } catch { return undefined }
+}
+
+function setLastUsernameLS(username: string) {
+  try { localStorage.setItem(USERNAME_LS, username) } catch {}
+}
+
 async function api(path: string, init?: RequestInit) {
   if (!API_BASE) throw new Error('Missing VITE_API_BASE_URL')
   const token = getAuthToken()
   const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(init?.headers as Record<string, string> | undefined || {}) }
   if (token) headers['Authorization'] = `Bearer ${token}`
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  if (!res.ok) {
+    // If we're online and server says unauthorized (expired/invalid token) for a protected endpoint → require re-auth
+    const isAuthEndpoint = path.startsWith('/login') || path.startsWith('/register')
+    if (navigator.onLine && res.status === 401 && !isAuthEndpoint) {
+      emitAuthRequired(true)
+      throw new Error('AUTH_REQUIRED')
+    }
+    throw new Error(`${res.status} ${res.statusText}`)
+  }
   return res.json()
 }
 
@@ -33,7 +91,13 @@ export async function login(username: string, password: string): Promise<void> {
   const resp = await api('/login', { method: 'POST', body: JSON.stringify({ username, password }) })
   const token = resp?.data?.token as string
   if (!token) throw new Error('No token')
+  setLastUsernameLS(username)
   localStorage.setItem(TOKEN_KV, token)
+  emitAuthRequired(false)
+}
+
+export function getLastUsername(): string | undefined {
+  return getLastUsernameLS()
 }
 
 export function logout(): void {
@@ -156,7 +220,7 @@ function toTagChange(t: TagRecord) {
 }
 
 async function pushDirty() {
-  if (!navigator.onLine || !API_BASE || !getAuthToken()) return { applied: 0 }
+  if (!navigator.onLine || !API_BASE || !getAuthToken() || isAuthRequired()) return { applied: 0 }
 
   const [notes, filters, tags] = await Promise.all([
     db.notes.where('isDirty').equals(1).toArray(),
@@ -224,7 +288,7 @@ async function pushDirty() {
 }
 
 async function pullSince() {
-  if (!navigator.onLine || !API_BASE || !getAuthToken()) return { pulled: 0 }
+  if (!navigator.onLine || !API_BASE || !getAuthToken() || isAuthRequired()) return { pulled: 0 }
   const since = (await getKV<string>(LAST_SYNC_KV, '1970-01-01T00:00:00Z'))!
   const resp = await api(`/sync?since=${encodeURIComponent(since)}`)
   const data = resp?.data || {}
@@ -337,6 +401,7 @@ let syncQueued = false
 
 export async function runSync(): Promise<void> {
   if (syncRunning) { syncQueued = true; return }
+  if (isAuthRequired()) return
   syncRunning = true
   try {
     await pushDirty()
@@ -399,6 +464,7 @@ export function scheduleAutoSync() {
 
 export async function setAuthToken(token: string) {
   localStorage.setItem(TOKEN_KV, token)
+  emitAuthRequired(false)
   await runSync()
 }
 

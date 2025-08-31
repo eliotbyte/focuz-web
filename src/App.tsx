@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db, setKV } from './lib/db'
 import type { NoteRecord, FilterRecord, SpaceRecord } from './lib/types'
-import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote } from './lib/sync'
+import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote, onAuthRequired, isAuthRequired, getLastUsername } from './lib/sync'
 
 function TopBar({ onOpenSpaces, onOpenSettings, onLogout }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void }) {
   return (
@@ -224,11 +224,9 @@ function NoteList({ spaceId, filter }: { spaceId: number; filter: FilterRecord |
       result = result.filter(n => n.text.toLowerCase().includes(q))
     }
     if (filter?.params?.includeTags?.length) {
-      result = result.filter(n => filter!.params!.includeTags!.every(t => n.tags.includes(t)))
-    }
+      result = result.filter(n => filter!.params!.includeTags!.every(t => n.tags.includes(t)))}
     if (filter?.params?.excludeTags?.length) {
-      result = result.filter(n => !filter!.params!.excludeTags!.some(t => n.tags.includes(t)))
-    }
+      result = result.filter(n => !filter!.params!.excludeTags!.some(t => n.tags.includes(t)))}
     const sort = filter?.params?.sort ?? 'createdat,DESC'
     result.sort((a, b) => {
       const aKey = sort.startsWith('createdat') ? a.createdAt : a.modifiedAt
@@ -259,12 +257,62 @@ function NoteList({ spaceId, filter }: { spaceId: number; filter: FilterRecord |
   )
 }
 
+function ReauthOverlay({ onDone }: { onDone: () => void }) {
+  const [username, setUsername] = useState<string>(getLastUsername() || '')
+  const [password, setPassword] = useState('')
+  const [show, setShow] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function submit() {
+    setLoading(true)
+    setError(null)
+    try {
+      await login(username.trim(), password)
+      await runSync()
+      onDone()
+    } catch (e: any) {
+      setError(e?.message || 'Auth failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const canSubmit = username.trim().length >= 3 && password.length >= 8
+
+  return (
+    <div className="fixed inset-0 z-[60]">
+      <div className="absolute inset-0 bg-black/60" />
+      <div className="absolute inset-0 flex items-center justify-center p-4">
+        <div className="w-full max-w-sm card space-y-4">
+          <h2 className="text-lg font-medium">Session expired</h2>
+          <input className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} />
+          <div className="flex gap-2">
+            <input className="input" placeholder="Password" type={show ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} />
+            <button className="button" onClick={() => setShow(s => !s)} type="button">{show ? 'Hide' : 'Show'}</button>
+          </div>
+          {error && <div className="text-sm text-red-400">{error}</div>}
+          <div className="flex justify-end">
+            <button className="button" onClick={submit} disabled={!canSubmit || loading}>{loading ? '...' : 'Sign in'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [authed, setAuthed] = useState<boolean>(isAuthenticated())
   const [currentSpaceId, setCurrentSpaceId] = useState<number | null>(null)
   const [selectedFilter, setSelectedFilter] = useState<FilterRecord | null>(null)
+  const [needReauth, setNeedReauth] = useState<boolean>(() => isAuthRequired())
+
+  useEffect(() => {
+    const off = onAuthRequired(setNeedReauth)
+    return () => { off() }
+  }, [])
 
   useEffect(() => {
     document.documentElement.dataset.theme = (document.documentElement.dataset.theme || 'dark')
@@ -273,7 +321,6 @@ function App() {
         const id = await getCurrentSpaceId()
         setCurrentSpaceId(id)
         await runSync()
-        // Safety: run one more shortly after to catch concurrent pushes from other clients
         setTimeout(() => { runSync() }, 1000)
       })
       const { kick } = scheduleAutoSync()
@@ -304,6 +351,7 @@ function App() {
 
       {drawerOpen && <SpaceDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} currentId={currentSpaceId} />}
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+      {needReauth && <ReauthOverlay onDone={() => setNeedReauth(false)} />}
     </div>
   )
 }
