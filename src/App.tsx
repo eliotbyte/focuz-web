@@ -6,6 +6,7 @@ import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login
 import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
 import HighlightedText from './components/HighlightedText'
 import { formatRelativeShort } from './lib/time'
+import NoteEditor, { type NoteEditorValue } from './components/NoteEditor'
 
 function TopBar({ onOpenSpaces, onOpenSettings, onLogout }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void }) {
   return (
@@ -211,8 +212,8 @@ function QuickFiltersPanel({
 }
 
 function NoteComposer({ spaceId }: { spaceId: number }) {
-  const [text, setText] = useState('')
-  const canAdd = useMemo(() => text.trim().length > 0, [text])
+  const [value, setValue] = useState<NoteEditorValue>({ text: '', tags: [] })
+  const canAdd = useMemo(() => value.text.trim().length > 0, [value.text])
 
   async function addNote() {
     if (!canAdd) return
@@ -220,8 +221,8 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
     const payload: NoteRecord = {
       spaceId,
       title: null,
-      text: text.trim(),
-      tags: [],
+      text: value.text.trim(),
+      tags: value.tags,
       createdAt: now,
       modifiedAt: now,
       date: now,
@@ -233,16 +234,11 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
     }
     await db.notes.add(payload)
     window.dispatchEvent(new Event('focuz:local-write'))
-    setText('')
+    setValue({ text: '', tags: [] })
   }
 
   return (
-    <div className="card space-y-3">
-      <textarea className="input min-h-24" placeholder="Add note…" value={text} onChange={e => setText(e.target.value)} />
-      <div className="flex justify-end">
-        <button className="button" onClick={addNote} disabled={!canAdd}>Add</button>
-      </div>
-    </div>
+    <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onCancel={() => setValue({ text: '', tags: [] })} mode="create" />
   )
 }
 
@@ -339,6 +335,11 @@ function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterR
               )}
             </div>
           </div>
+          {n.tags?.length ? (
+            <div className="mt-2 text-sm text-neutral-400">
+              {n.tags.join(', ')}
+            </div>
+          ) : null}
           <div className="mt-2 text-xs text-neutral-400 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span>{n.isDirty ? '✔' : '✔✔'}</span>
