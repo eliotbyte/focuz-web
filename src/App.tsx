@@ -3,6 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db, setKV } from './lib/db'
 import type { NoteRecord, FilterRecord, SpaceRecord } from './lib/types'
 import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote, onAuthRequired, isAuthRequired, getLastUsername } from './lib/sync'
+import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
 
 function TopBar({ onOpenSpaces, onOpenSettings, onLogout }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void }) {
   return (
@@ -133,7 +134,7 @@ function FiltersList({ spaceId, onSelect }: { spaceId: number; onSelect: (f: Fil
     const now = new Date().toISOString()
     const id = await db.filters.add({
       name: 'All notes',
-      params: { sort: 'createdat,DESC' },
+      params: { sort: 'modifiedat,DESC' },
       spaceId,
       parentId: null,
       serverId: null,
@@ -166,12 +167,42 @@ function FiltersList({ spaceId, onSelect }: { spaceId: number; onSelect: (f: Fil
   )
 }
 
-function QuickFiltersPanel() {
+type SortField = 'date' | 'createdat' | 'modifiedat'
+
+function QuickFiltersPanel({
+  value,
+  onChange,
+}: {
+  value: { text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }
+  onChange: (v: { text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }) => void
+}) {
+  const [text, setText] = useState(value.text)
+  const [noParents, setNoParents] = useState(value.noParents)
+  const [sortField, setSortField] = useState<SortField>(value.sort.split(',')[0] as SortField)
+  const [sortDir, setSortDir] = useState<'ASC' | 'DESC'>(value.sort.split(',')[1] as 'ASC' | 'DESC')
+
+  useEffect(() => { setText(value.text); setNoParents(value.noParents); setSortField(value.sort.split(',')[0] as SortField); setSortDir(value.sort.split(',')[1] as 'ASC' | 'DESC') }, [value])
+
   return (
     <aside className="hidden lg:block w-64 shrink-0">
-      <div className="card">
-        <div className="mb-2 font-medium">Quick filters</div>
-        <div className="text-sm text-neutral-400">Coming soon</div>
+      <div className="card space-y-3">
+        <div className="mb-1 font-medium">Quick filters</div>
+        <input className="input" placeholder="Search" value={text} onChange={e => { const v = e.target.value; setText(v); onChange({ text: v, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }} />
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={noParents} onChange={e => { setNoParents(e.target.checked); onChange({ text, noParents: e.target.checked, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }} />
+          No parents
+        </label>
+        <div className="grid grid-cols-2 gap-2">
+          <select className="input" value={sortField} onChange={e => { const f = e.target.value as SortField; setSortField(f); onChange({ text, noParents, sort: `${f},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
+            <option value="modifiedat">modified_at</option>
+            <option value="createdat">created_at</option>
+            <option value="date">date</option>
+          </select>
+          <select className="input" value={sortDir} onChange={e => { const d = e.target.value as 'ASC' | 'DESC'; setSortDir(d); onChange({ text, noParents, sort: `${sortField},${d}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
+            <option value="DESC">desc</option>
+            <option value="ASC">asc</option>
+          </select>
+        </div>
       </div>
     </aside>
   )
@@ -191,6 +222,8 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
       tags: [],
       createdAt: now,
       modifiedAt: now,
+      date: now,
+      parentId: null,
       deletedAt: null,
       isDirty: 1,
       serverId: null,
@@ -211,7 +244,21 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
   )
 }
 
-function NoteList({ spaceId, filter }: { spaceId: number; filter: FilterRecord | null }) {
+function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterRecord | null; quick: { text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` } }) {
+  const [idsBySearch, setIdsBySearch] = useState<number[] | null>(null)
+
+  useEffect(() => {
+    ensureNoteIndexForSpace(spaceId).catch(() => {})
+  }, [spaceId])
+
+  useEffect(() => {
+    let cancelled = false
+    const q = (quick.text || '').trim()
+    if (!q) { setIdsBySearch(null); return }
+    searchNotes(spaceId, q).then(ids => { if (!cancelled) setIdsBySearch(ids) }).catch(() => { if (!cancelled) setIdsBySearch([]) })
+    return () => { cancelled = true }
+  }, [spaceId, quick.text])
+
   const notes = useLiveQuery(async () => {
     let coll = db.notes
       .where('spaceId')
@@ -219,22 +266,40 @@ function NoteList({ spaceId, filter }: { spaceId: number; filter: FilterRecord |
       .filter(n => !n.deletedAt)
     const arr = await coll.toArray()
     let result = arr
-    if (filter?.params?.textContains) {
+
+    if (idsBySearch) {
+      const set = new Set(idsBySearch)
+      result = result.filter(n => set.has(n.id!))
+      // keep order by search ranking for equal sort later
+      const rank = new Map(idsBySearch.map((id, i) => [id, i]))
+      result.sort((a,b) => (rank.get(a.id!)! - rank.get(b.id!)!))
+    } else if (filter?.params?.textContains) {
       const q = filter.params.textContains.toLowerCase()
       result = result.filter(n => n.text.toLowerCase().includes(q))
     }
+
+    if (quick.noParents || filter?.params?.notReply) {
+      result = result.filter(n => (n.parentId ?? null) === null)
+    }
     if (filter?.params?.includeTags?.length) {
-      result = result.filter(n => filter!.params!.includeTags!.every(t => n.tags.includes(t)))}
+      result = result.filter(n => filter!.params!.includeTags!.every(t => n.tags.includes(t)))
+    }
     if (filter?.params?.excludeTags?.length) {
-      result = result.filter(n => !filter!.params!.excludeTags!.some(t => n.tags.includes(t)))}
-    const sort = filter?.params?.sort ?? 'createdat,DESC'
+      result = result.filter(n => !filter!.params!.excludeTags!.some(t => n.tags.includes(t)))
+    }
+
+    const sort = quick.sort || filter?.params?.sort || 'modifiedat,DESC'
     result.sort((a, b) => {
-      const aKey = sort.startsWith('createdat') ? a.createdAt : a.modifiedAt
-      const bKey = sort.startsWith('createdat') ? b.createdAt : b.modifiedAt
-      return sort.endsWith('ASC') ? aKey.localeCompare(bKey) : bKey.localeCompare(aKey)
+      const field = (typeof sort === 'string' ? sort.split(',')[0] : 'modifiedat') as SortField
+      const dir = (typeof sort === 'string' ? sort.split(',')[1] : 'DESC') as 'ASC' | 'DESC'
+      const aKey = field === 'createdat' ? (a.createdAt) : field === 'modifiedat' ? (a.modifiedAt) : (a.date || a.createdAt)
+      const bKey = field === 'createdat' ? (b.createdAt) : field === 'modifiedat' ? (b.modifiedAt) : (b.date || b.createdAt)
+      const cmp = aKey.localeCompare(bKey)
+      return dir === 'ASC' ? cmp : -cmp
     })
+
     return result
-  }, [spaceId, JSON.stringify(filter?.params ?? {})]) ?? []
+  }, [spaceId, JSON.stringify(filter?.params ?? {}), JSON.stringify(quick), JSON.stringify(idsBySearch)]) ?? []
 
   async function removeNote(id: number) {
     await deleteNote(id)
@@ -309,6 +374,8 @@ function App() {
   const [selectedFilter, setSelectedFilter] = useState<FilterRecord | null>(null)
   const [needReauth, setNeedReauth] = useState<boolean>(() => isAuthRequired())
 
+  const [quick, setQuick] = useState<{ text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }>({ text: '', noParents: false, sort: 'modifiedat,DESC' })
+
   useEffect(() => {
     const off = onAuthRequired(setNeedReauth)
     return () => { off() }
@@ -316,10 +383,12 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = (document.documentElement.dataset.theme || 'dark')
+    initSearch().catch(() => {})
     if (authed) {
       ensureDefaultSpace().then(async () => {
         const id = await getCurrentSpaceId()
         setCurrentSpaceId(id)
+        await ensureNoteIndexForSpace(id)
         await runSync()
         setTimeout(() => { runSync() }, 1000)
       })
@@ -336,7 +405,7 @@ function App() {
   const center = currentSpaceId ? (
     <div className="flex-1 space-y-4">
       <NoteComposer spaceId={currentSpaceId} />
-      <NoteList spaceId={currentSpaceId} filter={selectedFilter} />
+      <NoteList spaceId={currentSpaceId} filter={selectedFilter} quick={quick} />
     </div>
   ) : null
 
@@ -346,7 +415,7 @@ function App() {
       <div className="flex gap-4">
         {left}
         {center}
-        <QuickFiltersPanel />
+        <QuickFiltersPanel value={quick} onChange={setQuick} />
       </div>
 
       {drawerOpen && <SpaceDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} currentId={currentSpaceId} />}

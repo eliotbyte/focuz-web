@@ -29,6 +29,16 @@ class AppDatabase extends Dexie {
       charts: '++id, serverId, noteId, createdAt, modifiedAt, deletedAt, isDirty',
       meta: 'key',
     })
+    this.version(3).stores({
+      spaces: '++id, serverId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      // add indexes for parentId and date for efficient filter/sort
+      notes: '++id, serverId, clientId, spaceId, parentId, date, createdAt, modifiedAt, deletedAt, isDirty',
+      tags: '++id, serverId, spaceId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      filters: '++id, serverId, spaceId, parentId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      activities: '++id, serverId, noteId, createdAt, modifiedAt, deletedAt, isDirty',
+      charts: '++id, serverId, noteId, createdAt, modifiedAt, deletedAt, isDirty',
+      meta: 'key',
+    })
   }
 }
 

@@ -2,7 +2,10 @@ import { db, getKV, setKV, wipeLocalData } from './db'
 import type { FilterRecord, NoteRecord, SpaceRecord, TagRecord } from './types'
 
 const API_BASE = (import.meta as any).env.VITE_API_BASE_URL as string | undefined
-const SYNC_INTERVAL_MS = 5 * 1000
+const BASE_SYNC_INTERVAL_MS = Number(((import.meta as any).env.VITE_SYNC_INTERVAL_MS ?? '60000')) || 60000
+const DEBOUNCE_LOCAL_MS = Number(((import.meta as any).env.VITE_SYNC_DEBOUNCE_MS ?? '2000')) || 2000
+const WS_COOLDOWN_MS = Number(((import.meta as any).env.VITE_SYNC_WS_COOLDOWN_MS ?? '3000')) || 3000
+const NO_CHANGE_BACKOFF_MS = Number(((import.meta as any).env.VITE_SYNC_BACKOFF_MS ?? '15000')) || 15000
 const LAST_SYNC_KV = 'lastSyncAt'
 const CURRENT_SPACE_KV = 'currentSpaceId'
 const TOKEN_KV = 'authToken'
@@ -190,7 +193,8 @@ function toNoteChange(n: NoteRecord) {
     created_at: n.createdAt,
     modified_at: n.modifiedAt,
     deleted_at: n.deletedAt ?? null,
-    parent_id: null,
+    parent_id: n.parentId ?? null,
+    date: n.date ?? n.createdAt,
   }
 }
 
@@ -222,11 +226,9 @@ function toTagChange(t: TagRecord) {
 async function pushDirty() {
   if (!navigator.onLine || !API_BASE || !getAuthToken() || isAuthRequired()) return { applied: 0 }
 
-  const [notes, filters, tags] = await Promise.all([
-    db.notes.where('isDirty').equals(1).toArray(),
-    db.filters.where('isDirty').equals(1).toArray(),
-    db.tags.where('isDirty').equals(1).toArray(),
-  ])
+  const notes = await db.notes.where('isDirty').equals(1).toArray()
+  const filters = await db.filters.where('isDirty').equals(1).toArray()
+  const tags = await db.tags.where('isDirty').equals(1).toArray()
 
   // Fallback: call deprecated delete endpoint for server-backed notes with deletedAt
   const deletions = notes.filter(n => n.deletedAt && n.serverId)
@@ -273,9 +275,9 @@ async function pushDirty() {
         // Deduplicate: if multiple notes now share the same serverId, keep the one with a clientId (local) if exists
         const withSame = await db.notes.where('serverId').equals(m.serverId).toArray()
         if (withSame.length > 1) {
-          const keep = withSame.find(n => !!n.clientId) ?? withSame[0]
+          const keep = withSame.find(n => !!n.clientId)
           for (const x of withSame) {
-            if (x.id !== keep.id) {
+            if (x.id !== keep!.id) {
               await db.notes.delete(x.id!)
             }
           }
@@ -283,6 +285,8 @@ async function pushDirty() {
       }
     }
   })
+
+  try { window.dispatchEvent(new Event('focuz:sync-applied')) } catch {}
 
   return { applied: resp?.data?.applied ?? 0 }
 }
@@ -336,6 +340,8 @@ async function pullSince() {
         tags: n.tags ?? [],
         createdAt: n.created_at,
         modifiedAt: n.modified_at,
+        date: n.date ?? n.created_at,
+        parentId: n.parent_id ?? null,
         deletedAt: n.deleted_at ?? null,
         isDirty: 0,
       }
@@ -380,40 +386,40 @@ async function pullSince() {
     }
   })
 
-  // Only move forward to what the server told us exists. If nothing new, keep since unchanged.
-  // Use a small overlap window (1ms) because server uses strict '>' comparison.
-  const nextSince = (() => {
-    try {
-      const t = Date.parse(maxSyncAt)
-      if (Number.isFinite(t)) return new Date(t - 1).toISOString()
-    } catch {}
-    return maxSyncAt
-  })()
-  await setKV(LAST_SYNC_KV, nextSince)
+  await setKV(LAST_SYNC_KV, maxSyncAt)
+
+  try { window.dispatchEvent(new Event('focuz:sync-applied')) } catch {}
+
   return { pulled }
 }
 
-let syncTimer: number | undefined
+let syncTimer: number | null = null
 let ws: WebSocket | null = null
 let wsRetryMs = 1000
-let syncRunning = false
 let syncQueued = false
+let syncRunning = false
+let backoffUntilMs = 0
+let lastSyncAtMs = 0
+let lastWSTriggerMs = 0
 
-export async function runSync(): Promise<void> {
+export async function runSync(force = false): Promise<void> {
+  const now = Date.now()
+  if (!force && now < backoffUntilMs) return
   if (syncRunning) { syncQueued = true; return }
-  if (isAuthRequired()) return
   syncRunning = true
   try {
-    await pushDirty()
-    await pullSince()
-  } catch (e) {
-    console.debug('sync error', e)
+    const pushed = await pushDirty()
+    const pulled = await pullSince()
+    lastSyncAtMs = Date.now()
+    if ((pushed.applied ?? 0) === 0 && (pulled.pulled ?? 0) === 0) {
+      backoffUntilMs = lastSyncAtMs + NO_CHANGE_BACKOFF_MS
+    } else {
+      backoffUntilMs = 0
+    }
   } finally {
     syncRunning = false
     if (syncQueued) {
       syncQueued = false
-      // run again immediately to process any events queued during the last run
-      // avoid stack growth
       setTimeout(() => runSync(), 0)
     }
   }
@@ -422,16 +428,17 @@ export async function runSync(): Promise<void> {
 export function scheduleAutoSync() {
   const kick = () => {
     if (syncTimer) window.clearTimeout(syncTimer)
-    syncTimer = window.setTimeout(() => runSync(), 1500)
+    syncTimer = window.setTimeout(() => runSync(true), DEBOUNCE_LOCAL_MS)
   }
 
   window.addEventListener('online', () => runSync())
-  window.addEventListener('focus', () => { runSync(); kick() })
+  window.addEventListener('focus', () => { runSync(); /* no forced */ })
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { runSync(); kick() }
+    if (document.visibilityState === 'visible') { runSync() }
   })
 
-  setInterval(() => runSync(), SYNC_INTERVAL_MS)
+  // Periodic baseline sync
+  window.setInterval(() => runSync(), BASE_SYNC_INTERVAL_MS)
 
   // Best-effort websocket to get nudges from server when other sessions push
   const connectWS = () => {
@@ -444,20 +451,24 @@ export function scheduleAutoSync() {
       const wsUrl = `${wsProto}//${url.host}/ws?token=${encodeURIComponent(token)}`
       ws = new WebSocket(wsUrl, [])
       ws.onopen = () => { wsRetryMs = 1000 }
-      ws.onmessage = () => { runSync() }
+      ws.onmessage = () => {
+        const now = Date.now()
+        if (now - lastWSTriggerMs < WS_COOLDOWN_MS) return
+        lastWSTriggerMs = now
+        runSync()
+      }
       ws.onclose = () => {
         ws = null
         setTimeout(connectWS, wsRetryMs)
         wsRetryMs = Math.min(wsRetryMs * 2, 30000)
       }
       ws.onerror = () => { try { ws?.close() } catch {} }
-      // Attach token via header is not possible in browser WS; fallback to bearer via initial HTTP group auth.
-      // Since /ws is under auth group, ensure the app uses an auth-bearing cookie or proxy. If not, ignore silently.
     } catch {
       setTimeout(connectWS, wsRetryMs)
       wsRetryMs = Math.min(wsRetryMs * 2, 30000)
     }
   }
+
   connectWS()
   return { kick }
 }
@@ -465,7 +476,7 @@ export function scheduleAutoSync() {
 export async function setAuthToken(token: string) {
   localStorage.setItem(TOKEN_KV, token)
   emitAuthRequired(false)
-  await runSync()
+  await runSync(true)
 }
 
 export async function getCurrentSpaceId(): Promise<number> {

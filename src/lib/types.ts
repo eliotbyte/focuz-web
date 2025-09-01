@@ -23,6 +23,8 @@ export interface NoteRecord {
   tags: string[]
   createdAt: string
   modifiedAt: string
+  date?: string
+  parentId?: number | null
   deletedAt?: string | null
   isDirty: 0 | 1
 }
@@ -43,7 +45,10 @@ export interface FilterParams {
   includeTags?: string[]
   excludeTags?: string[]
   notReply?: boolean
-  sort?: 'createdat,ASC' | 'createdat,DESC' | 'modifiedat,ASC' | 'modifiedat,DESC'
+  sort?:
+    | 'date,ASC' | 'date,DESC'
+    | 'createdat,ASC' | 'createdat,DESC'
+    | 'modifiedat,ASC' | 'modifiedat,DESC'
 }
 
 export interface FilterRecord {
