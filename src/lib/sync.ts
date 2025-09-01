@@ -182,6 +182,11 @@ export async function deleteNote(localId: number): Promise<void> {
   await db.notes.update(localId, { deletedAt: now, modifiedAt: now, isDirty: 1 })
 }
 
+export async function updateNoteLocal(localId: number, changes: { text?: string; tags?: string[] }): Promise<void> {
+  const now = new Date().toISOString()
+  await db.notes.update(localId, { ...changes, modifiedAt: now, isDirty: 1 })
+}
+
 function toNoteChange(n: NoteRecord) {
   return {
     id: n.serverId ?? null,

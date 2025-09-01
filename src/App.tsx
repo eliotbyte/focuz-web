@@ -3,6 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db, setKV } from './lib/db'
 import type { NoteRecord, FilterRecord, SpaceRecord } from './lib/types'
 import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote, onAuthRequired, isAuthRequired, getLastUsername } from './lib/sync'
+import { updateNoteLocal } from './lib/sync'
 import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
 import HighlightedText from './components/HighlightedText'
 import { formatRelativeShort } from './lib/time'
@@ -245,6 +246,8 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
 function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterRecord | null; quick: { text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` } }) {
   const [idsBySearch, setIdsBySearch] = useState<number[] | null>(null)
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editingValue, setEditingValue] = useState<{ text: string; tags: string[] }>({ text: '', tags: [] })
 
   useEffect(() => {
     ensureNoteIndexForSpace(spaceId).catch(() => {})
@@ -257,6 +260,13 @@ function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterR
     searchNotes(spaceId, q).then(ids => { if (!cancelled) setIdsBySearch(ids) }).catch(() => { if (!cancelled) setIdsBySearch([]) })
     return () => { cancelled = true }
   }, [spaceId, quick.text])
+
+  useEffect(() => {
+    if (editingId != null) {
+      const n = notes.find(x => x.id === editingId)
+      if (n) setEditingValue({ text: n.text, tags: n.tags || [] })
+    }
+  }, [editingId])
 
   const notes = useLiveQuery(async () => {
     let coll = db.notes
@@ -314,41 +324,62 @@ function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterR
     window.dispatchEvent(new Event('focuz:local-write'))
   }
 
+  async function saveEdit(id: number, value: { text: string; tags: string[] }) {
+    await updateNoteLocal(id, { text: value.text.trim(), tags: value.tags })
+    window.dispatchEvent(new Event('focuz:local-write'))
+    setEditingId(null)
+  }
+
   return (
     <ul className="space-y-3">
       {notes.map((n: NoteRecord) => (
         <li key={n.id} className="card">
-          <div className="flex items-start gap-3">
-            <HighlightedText className="flex-1 whitespace-pre-wrap text-sm leading-6" text={n.text} query={(quick.text || filter?.params?.textContains || '') as string} />
-            <div className="relative">
-              <button
-                className="px-2 py-1 rounded text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800"
-                onClick={() => setMenuOpenId(menuOpenId === n.id ? null : n.id!)}
-                aria-label="Open menu"
-              >
-                ⋯
-              </button>
-              {menuOpenId === n.id && (
-                <div className="absolute right-0 mt-1 z-10 rounded border border-neutral-800 bg-neutral-900 shadow-lg">
-                  <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpenId(null); removeNote(n.id!) }}>Delete</button>
+          {editingId === n.id ? (
+            <NoteEditor
+              value={editingValue}
+              onChange={setEditingValue}
+              onSubmit={() => saveEdit(n.id!, editingValue)}
+              onCancel={() => setEditingId(null)}
+              mode="edit"
+              autoCollapse={false}
+              variant="embedded"
+            />
+          ) : (
+            <>
+              <div className="flex items-start gap-3">
+                <HighlightedText className="flex-1 whitespace-pre-wrap text-sm leading-6" text={n.text} query={(quick.text || filter?.params?.textContains || '') as string} />
+                <div className="relative">
+                  <button
+                    className="px-2 py-1 rounded text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800"
+                    onClick={() => setMenuOpenId(menuOpenId === n.id ? null : n.id!)}
+                    aria-label="Open menu"
+                  >
+                    ⋯
+                  </button>
+                  {menuOpenId === n.id && (
+                    <div className="absolute right-0 mt-1 z-10 rounded border border-neutral-800 bg-neutral-900 shadow-lg">
+                      <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpenId(null); setEditingId(n.id!); setEditingValue({ text: n.text, tags: n.tags || [] }) }}>Edit</button>
+                      <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpenId(null); removeNote(n.id!) }}>Delete</button>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
-          {n.tags?.length ? (
-            <div className="mt-2 text-sm text-neutral-400">
-              {n.tags.join(', ')}
-            </div>
-          ) : null}
-          <div className="mt-2 text-xs text-neutral-400 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span>{n.isDirty ? '✔' : '✔✔'}</span>
-              <span>{formatRelativeShort(n.modifiedAt)}</span>
-            </div>
-            <button className="text-xs text-neutral-400 hover:text-neutral-200 transition" type="button" disabled>
-              ({repliesById.get(n.id!) || 0}) Reply
-            </button>
-          </div>
+              </div>
+              {n.tags?.length ? (
+                <div className="mt-2 text-sm text-neutral-400">
+                  {n.tags.join(', ')}
+                </div>
+              ) : null}
+              <div className="mt-2 text-xs text-neutral-400 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span>{n.isDirty ? '✔' : '✔✔'}</span>
+                  <span>{formatRelativeShort(n.modifiedAt)}</span>
+                </div>
+                <button className="text-xs text-neutral-400 hover:text-neutral-200 transition" type="button" disabled>
+                  ({repliesById.get(n.id!) || 0}) Reply
+                </button>
+              </div>
+            </>
+          )}
         </li>
       ))}
       {notes.length === 0 && <li className="text-sm text-neutral-400">No notes</li>}

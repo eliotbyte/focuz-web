@@ -15,6 +15,7 @@ export default function NoteEditor({
   onCancel,
   mode = 'create',
   autoCollapse = true,
+  variant = 'card',
 }: {
   value: NoteEditorValue
   onChange: (v: NoteEditorValue) => void
@@ -22,6 +23,7 @@ export default function NoteEditor({
   onCancel?: () => void
   mode?: NoteEditorMode
   autoCollapse?: boolean
+  variant?: 'card' | 'embedded'
 }) {
   const [expanded, setExpanded] = useState<boolean>(mode !== 'create' ? true : false)
   const textRef = useRef<HTMLTextAreaElement | null>(null)
@@ -38,21 +40,22 @@ export default function NoteEditor({
 
   if (!expanded) {
     return (
-      <div className="card">
-        <textarea
-          ref={textRef}
-          className="input h-8 resize-none overflow-hidden"
-          placeholder="Add note…"
-          value=""
-          onFocus={() => setExpanded(true)}
-          readOnly
-        />
+      <div className="card p-2">
+        <button
+          type="button"
+          className="w-full text-left text-sm text-neutral-400 rounded px-1 py-1 hover:text-neutral-200"
+          onClick={() => setExpanded(true)}
+        >
+          Add note…
+        </button>
       </div>
     )
   }
 
+  const containerClass = variant === 'card' ? 'card space-y-3' : 'space-y-3'
+
   return (
-    <div className="card space-y-3">
+    <div className={containerClass}>
       <textarea
         ref={textRef}
         className="input min-h-24"
@@ -65,7 +68,7 @@ export default function NoteEditor({
         {onCancel && (
           <button className="button" onClick={() => { onCancel(); collapseIfNeeded() }}>Cancel</button>
         )}
-        <button className="button" onClick={() => { onSubmit(); collapseIfNeeded() }} disabled={!canSubmit}>Add</button>
+        <button className="button" onClick={() => { onSubmit(); collapseIfNeeded() }} disabled={!canSubmit}>{mode === 'edit' ? 'Update' : 'Add'}</button>
       </div>
     </div>
   )
