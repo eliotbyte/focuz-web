@@ -5,6 +5,7 @@ import type { NoteRecord, FilterRecord, SpaceRecord } from './lib/types'
 import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote, onAuthRequired, isAuthRequired, getLastUsername } from './lib/sync'
 import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
 import HighlightedText from './components/HighlightedText'
+import { formatRelativeShort } from './lib/time'
 
 function TopBar({ onOpenSpaces, onOpenSettings, onLogout }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void }) {
   return (
@@ -247,6 +248,7 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
 
 function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterRecord | null; quick: { text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` } }) {
   const [idsBySearch, setIdsBySearch] = useState<number[] | null>(null)
+  const [menuOpenId, setMenuOpenId] = useState<number | null>(null)
 
   useEffect(() => {
     ensureNoteIndexForSpace(spaceId).catch(() => {})
@@ -302,6 +304,15 @@ function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterR
     return result
   }, [spaceId, JSON.stringify(filter?.params ?? {}), JSON.stringify(quick), JSON.stringify(idsBySearch)]) ?? []
 
+  const repliesById = useMemo(() => {
+    const tally = new Map<number, number>()
+    for (const note of notes) {
+      const parentId = note.parentId ?? null
+      if (parentId !== null) tally.set(parentId, (tally.get(parentId) || 0) + 1)
+    }
+    return tally
+  }, [notes])
+
   async function removeNote(id: number) {
     await deleteNote(id)
     window.dispatchEvent(new Event('focuz:local-write'))
@@ -313,9 +324,30 @@ function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterR
         <li key={n.id} className="card">
           <div className="flex items-start gap-3">
             <HighlightedText className="flex-1 whitespace-pre-wrap text-sm leading-6" text={n.text} query={(quick.text || filter?.params?.textContains || '') as string} />
-            <button className="button" onClick={() => removeNote(n.id!)}>Delete</button>
+            <div className="relative">
+              <button
+                className="px-2 py-1 rounded text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800"
+                onClick={() => setMenuOpenId(menuOpenId === n.id ? null : n.id!)}
+                aria-label="Open menu"
+              >
+                ⋯
+              </button>
+              {menuOpenId === n.id && (
+                <div className="absolute right-0 mt-1 z-10 rounded border border-neutral-800 bg-neutral-900 shadow-lg">
+                  <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpenId(null); removeNote(n.id!) }}>Delete</button>
+                </div>
+              )}
+            </div>
           </div>
-          <div className="mt-2 text-xs text-neutral-400">{n.isDirty ? 'Not synced' : 'Synced'} • {new Date(n.modifiedAt).toLocaleString()}</div>
+          <div className="mt-2 text-xs text-neutral-400 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span>{n.isDirty ? '✔' : '✔✔'}</span>
+              <span>{formatRelativeShort(n.modifiedAt)}</span>
+            </div>
+            <button className="text-xs text-neutral-400 hover:text-neutral-200 transition" type="button" disabled>
+              ({repliesById.get(n.id!) || 0}) Reply
+            </button>
+          </div>
         </li>
       ))}
       {notes.length === 0 && <li className="text-sm text-neutral-400">No notes</li>}

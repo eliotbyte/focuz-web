@@ -41,3 +41,20 @@ body {
 [data-theme='light'] .card {
   @apply border-neutral-200 bg-white;
 }
+
+/* lightweight dropdown helpers */
+.dropdown-menu {
+  @apply rounded-md border border-neutral-800 bg-neutral-900 shadow-lg;
+}
+
+[data-theme='light'] .dropdown-menu {
+  @apply border-neutral-200 bg-white;
+}
+
+.dropdown-item {
+  @apply block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800;
+}
+
+[data-theme='light'] .dropdown-item {
+  @apply hover:bg-neutral-100;
+}
