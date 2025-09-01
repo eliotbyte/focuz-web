@@ -4,6 +4,7 @@ import { db, setKV } from './lib/db'
 import type { NoteRecord, FilterRecord, SpaceRecord } from './lib/types'
 import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote, onAuthRequired, isAuthRequired, getLastUsername } from './lib/sync'
 import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
+import HighlightedText from './components/HighlightedText'
 
 function TopBar({ onOpenSpaces, onOpenSettings, onLogout }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void }) {
   return (
@@ -311,7 +312,7 @@ function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterR
       {notes.map((n: NoteRecord) => (
         <li key={n.id} className="card">
           <div className="flex items-start gap-3">
-            <div className="flex-1 whitespace-pre-wrap text-sm leading-6">{n.text}</div>
+            <HighlightedText className="flex-1 whitespace-pre-wrap text-sm leading-6" text={n.text} query={(quick.text || filter?.params?.textContains || '') as string} />
             <button className="button" onClick={() => removeNote(n.id!)}>Delete</button>
           </div>
           <div className="mt-2 text-xs text-neutral-400">{n.isDirty ? 'Not synced' : 'Synced'} • {new Date(n.modifiedAt).toLocaleString()}</div>
