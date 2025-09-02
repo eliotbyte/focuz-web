@@ -51,14 +51,14 @@ export default function TagsInput({ value, onChange, placeholder, className }: {
   return (
     <div className={containerClasses} onClick={() => inputRef.current?.focus()}>
       {value.map((tag, idx) => (
-        <span key={`${tag}-${idx}`} className="inline-flex items-center gap-1 rounded-full bg-neutral-800 px-2 py-1 text-xs">
+        <span key={`${tag}-${idx}`} className="inline-flex items-center gap-1 rounded-full bg-neutral-800 px-2 py-1 text-xs text-secondary">
           <span>{tag}</span>
           <button type="button" className="text-neutral-400 hover:text-neutral-200" onClick={() => removeTag(idx)} aria-label={`Remove ${tag}`}>×</button>
         </span>
       ))}
       <input
         ref={inputRef}
-        className="bg-transparent outline-none flex-1 min-w-24 text-sm"
+        className="bg-transparent outline-none flex-1 min-w-24 text-primary"
         value={draft}
         placeholder={value.length === 0 ? (placeholder || 'Add tags') : ''}
         onChange={e => setDraft(e.target.value)}

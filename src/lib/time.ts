@@ -27,4 +27,16 @@ export function formatRelativeShort(input: string | Date, nowDate: Date = new Da
 
 	const years = Math.floor(days / 365)
 	return `${years}y`
+}
+
+export function formatExactDateTime(input: string | Date): string {
+	const d = typeof input === 'string' ? new Date(input) : input
+	const pad = (n: number) => n.toString().padStart(2, '0')
+	const DD = pad(d.getDate())
+	const MM = pad(d.getMonth() + 1)
+	const YYYY = d.getFullYear().toString()
+	const HH = pad(d.getHours())
+	const mm = pad(d.getMinutes())
+	const SS = pad(d.getSeconds())
+	return `${DD}-${MM}-${YYYY} ${HH}:${mm}:${SS}`
 } 

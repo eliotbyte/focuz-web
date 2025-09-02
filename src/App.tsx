@@ -7,6 +7,7 @@ import { updateNoteLocal } from './lib/sync'
 import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
 import HighlightedText from './components/HighlightedText'
 import { formatRelativeShort } from './lib/time'
+import { formatExactDateTime } from './lib/time'
 import NoteEditor, { type NoteEditorValue } from './components/NoteEditor'
 
 function TopBar({ onOpenSpaces, onOpenSettings, onLogout }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void }) {
@@ -331,9 +332,9 @@ function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterR
   }
 
   return (
-    <ul className="space-y-3">
+    <ul className="space-y-4">
       {notes.map((n: NoteRecord) => (
-        <li key={n.id} className="card">
+        <li key={n.id} className="card-nopad">
           {editingId === n.id ? (
             <NoteEditor
               value={editingValue}
@@ -346,11 +347,11 @@ function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterR
             />
           ) : (
             <>
-              <div className="flex items-start gap-3">
-                <HighlightedText className="flex-1 whitespace-pre-wrap text-sm leading-6" text={n.text} query={(quick.text || filter?.params?.textContains || '') as string} />
-                <div className="relative">
+              {/* Top bar (30px height) */}
+              <div className="h-[30px] relative">
+                <div className="absolute right-4 top-0 h-[30px] flex items-center">
                   <button
-                    className="px-2 py-1 rounded text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800"
+                    className="px-1 text-neutral-400 hover:text-neutral-100 h-[30px]"
                     onClick={() => setMenuOpenId(menuOpenId === n.id ? null : n.id!)}
                     aria-label="Open menu"
                   >
@@ -364,17 +365,24 @@ function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterR
                   )}
                 </div>
               </div>
-              {n.tags?.length ? (
-                <div className="mt-2 text-sm text-neutral-400">
-                  {n.tags.join(', ')}
-                </div>
-              ) : null}
-              <div className="mt-2 text-xs text-neutral-400 flex items-center justify-between">
-                <div className="flex items-center gap-2">
+
+              {/* Middle body: text */}
+              <div className="px-4">
+                <HighlightedText className="block whitespace-pre-wrap leading-6 text-primary" text={n.text} query={(quick.text || filter?.params?.textContains || '') as string} />
+                {n.tags?.length ? (
+                  <div className="mt-2 text-secondary">
+                    {n.tags.join(', ')}
+                  </div>
+                ) : null}
+              </div>
+
+              {/* Bottom bar */}
+              <div className="px-4 py-2 text-secondary flex items-center justify-between">
+                <div className="flex items-center gap-2" title={formatExactDateTime(n.createdAt)}>
                   <span>{n.isDirty ? '✔' : '✔✔'}</span>
-                  <span>{formatRelativeShort(n.modifiedAt)}</span>
+                  <span>{formatRelativeShort(n.createdAt)}</span>
                 </div>
-                <button className="text-xs text-neutral-400 hover:text-neutral-200 transition" type="button" disabled>
+                <button className="text-secondary hover:text-neutral-200 transition" type="button" disabled>
                   ({repliesById.get(n.id!) || 0}) Reply
                 </button>
               </div>
@@ -382,7 +390,7 @@ function NoteList({ spaceId, filter, quick }: { spaceId: number; filter: FilterR
           )}
         </li>
       ))}
-      {notes.length === 0 && <li className="text-sm text-neutral-400">No notes</li>}
+      {notes.length === 0 && <li className="text-secondary">No notes</li>}
     </ul>
   )
 }
@@ -468,7 +476,7 @@ function App() {
 
   const left = currentSpaceId ? <FiltersList spaceId={currentSpaceId} onSelect={setSelectedFilter} /> : null
   const center = currentSpaceId ? (
-    <div className="flex-1 space-y-4">
+    <div className="flex-1 space-y-[15px]">
       <NoteComposer spaceId={currentSpaceId} />
       <NoteList spaceId={currentSpaceId} filter={selectedFilter} quick={quick} />
     </div>

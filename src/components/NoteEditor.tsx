@@ -58,7 +58,7 @@ export default function NoteEditor({
     <div className={containerClass}>
       <textarea
         ref={textRef}
-        className="input min-h-24"
+        className="input min-h-24 text-primary"
         placeholder="Add note…"
         value={value.text}
         onChange={e => onChange({ ...value, text: e.target.value })}

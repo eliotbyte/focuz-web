@@ -3,6 +3,8 @@
 
 :root {
   color-scheme: light dark;
+  --color-primary: theme(colors.neutral.100);
+  --color-secondary: theme(colors.neutral.400);
 }
 
 html, body, #root {
@@ -11,6 +13,8 @@ html, body, #root {
 
 body {
   @apply bg-neutral-950 text-neutral-100 antialiased;
+  font-family: 'Open Sans', system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  font-size: 20px;
 }
 
 [data-theme='light'] body {
@@ -23,7 +27,7 @@ body {
 }
 
 .input {
-  @apply w-full rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-sky-500;
+  @apply w-full rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 outline-none focus:border-sky-500;
 }
 
 [data-theme='light'] .input {
@@ -31,14 +35,19 @@ body {
 }
 
 .button {
-  @apply inline-flex items-center gap-2 rounded-md bg-sky-500 px-3 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:opacity-50;
+  @apply inline-flex items-center gap-2 rounded-md bg-sky-500 px-3 py-2 font-medium text-white hover:bg-sky-600 disabled:opacity-50;
 }
 
 .card {
   @apply rounded-lg border border-neutral-800 bg-neutral-900/60 p-4;
 }
 
-[data-theme='light'] .card {
+.card-nopad {
+  @apply rounded-lg border border-neutral-800 bg-neutral-900/60 p-0;
+}
+
+[data-theme='light'] .card,
+[data-theme='light'] .card-nopad {
   @apply border-neutral-200 bg-white;
 }
 
@@ -52,9 +61,16 @@ body {
 }
 
 .dropdown-item {
-  @apply block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800;
+  @apply block w-full text-left px-3 py-2 hover:bg-neutral-800;
 }
 
 [data-theme='light'] .dropdown-item {
   @apply hover:bg-neutral-100;
 }
+
+/* semantic colors */
+.text-primary { color: var(--color-primary); }
+.text-secondary { color: var(--color-secondary); }
+
+/* enforce 20px even if text-sm/text-xs used */
+.text-sm, .text-xs { font-size: 20px !important; }
