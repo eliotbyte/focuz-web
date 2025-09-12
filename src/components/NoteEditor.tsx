@@ -16,6 +16,7 @@ export default function NoteEditor({
   mode = 'create',
   autoCollapse = true,
   variant = 'card',
+  defaultExpanded,
 }: {
   value: NoteEditorValue
   onChange: (v: NoteEditorValue) => void
@@ -24,8 +25,11 @@ export default function NoteEditor({
   mode?: NoteEditorMode
   autoCollapse?: boolean
   variant?: 'card' | 'embedded'
+  defaultExpanded?: boolean
 }) {
-  const [expanded, setExpanded] = useState<boolean>(mode !== 'create' ? true : false)
+  const [expanded, setExpanded] = useState<boolean>(
+    typeof defaultExpanded === 'boolean' ? defaultExpanded : (mode !== 'create' ? true : false)
+  )
   const textRef = useRef<HTMLTextAreaElement | null>(null)
 
   const canSubmit = useMemo(() => value.text.trim().length > 0, [value.text])
@@ -35,7 +39,7 @@ export default function NoteEditor({
   }, [expanded])
 
   function collapseIfNeeded() {
-    if (autoCollapse && mode === 'create') setExpanded(false)
+    if (autoCollapse && (mode === 'create' || mode === 'reply')) setExpanded(false)
   }
 
   if (!expanded) {
@@ -46,7 +50,7 @@ export default function NoteEditor({
           className="w-full text-left text-sm text-neutral-400 rounded px-1 py-1 hover:text-neutral-200"
           onClick={() => setExpanded(true)}
         >
-          Add note…
+          {mode === 'reply' ? 'Reply…' : 'Add note…'}
         </button>
       </div>
     )
@@ -59,7 +63,7 @@ export default function NoteEditor({
       <textarea
         ref={textRef}
         className="input min-h-24 text-primary"
-        placeholder="Add note…"
+        placeholder={mode === 'reply' ? 'Reply…' : 'Add note…'}
         value={value.text}
         onChange={e => onChange({ ...value, text: e.target.value })}
       />
@@ -68,7 +72,7 @@ export default function NoteEditor({
         {onCancel && (
           <button className="button" onClick={() => { onCancel(); collapseIfNeeded() }}>Cancel</button>
         )}
-        <button className="button" onClick={() => { onSubmit(); collapseIfNeeded() }} disabled={!canSubmit}>{mode === 'edit' ? 'Update' : 'Add'}</button>
+        <button className="button" onClick={() => { onSubmit(); collapseIfNeeded() }} disabled={!canSubmit}>{mode === 'edit' ? 'Update' : mode === 'reply' ? 'Reply' : 'Add'}</button>
       </div>
     </div>
   )
