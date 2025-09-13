@@ -403,99 +403,107 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
 
   return (
     <ul className="space-y-4">
-      {notes.map((n: NoteRecord) => (
-        <li key={n.id} className="card-nopad">
-          {editingId === n.id ? (
-            <NoteEditor
-              value={editingValue}
-              onChange={setEditingValue}
-              onSubmit={() => saveEdit(n.id!, editingValue)}
-              onCancel={() => setEditingId(null)}
-              mode="edit"
-              autoCollapse={false}
-              variant="embedded"
-              spaceId={spaceId}
-            />
-          ) : (
-            <>
-              {/* Top bar (30px height) */}
-              <div className="h-[30px] relative">
-                <div className="absolute right-4 top-0 h-[30px] flex items-center">
-                  <button
-                    className="px-1 text-neutral-400 hover:text-neutral-100 h-[30px]"
-                    onClick={() => setMenuOpenId(menuOpenId === n.id ? null : n.id!)}
-                    aria-label="Open menu"
-                  >
-                    ⋯
-                  </button>
-                  {menuOpenId === n.id && (
-                    <div className="absolute right-0 mt-1 z-10 rounded border border-neutral-800 bg-neutral-900 shadow-lg">
-                      <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpenId(null); setEditingId(n.id!); setEditingValue({ text: n.text, tags: n.tags || [] }) }}>Edit</button>
-                      <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpenId(null); removeNote(n.id!) }}>Delete</button>
+      {notes.flatMap((n: NoteRecord) => {
+        const items: ReactNode[] = []
+        // Note item (either editor replacing the note, or the note card)
+        items.push(
+          <li key={n.id}>
+            {editingId === n.id ? (
+              <NoteEditor
+                value={editingValue}
+                onChange={setEditingValue}
+                onSubmit={() => saveEdit(n.id!, editingValue)}
+                onCancel={() => setEditingId(null)}
+                mode="edit"
+                autoCollapse={false}
+                variant="card"
+                spaceId={spaceId}
+              />
+            ) : (
+              <div className="card-nopad">
+                {/* Top bar (30px height) */}
+                <div className="h-[30px] relative">
+                  <div className="absolute right-4 top-0 h-[30px] flex items-center">
+                    <button
+                      className="px-1 text-neutral-400 hover:text-neutral-100 h-[30px]"
+                      onClick={() => setMenuOpenId(menuOpenId === n.id ? null : n.id!)}
+                      aria-label="Open menu"
+                    >
+                      ⋯
+                    </button>
+                    {menuOpenId === n.id && (
+                      <div className="absolute right-0 mt-1 z-10 rounded border border-neutral-800 bg-neutral-900 shadow-lg">
+                        <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpenId(null); setEditingId(n.id!); setEditingValue({ text: n.text, tags: n.tags || [] }) }}>Edit</button>
+                        <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpenId(null); removeNote(n.id!) }}>Delete</button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Middle body: text */}
+                <div className="px-4 min-w-0">
+                  {/* Parent preview chip (only in feed, not in thread replies) */}
+                  {parentId == null && (n.parentId ?? null) != null && parentPreviewById.get(n.parentId!) && (
+                    <div className="mb-2 min-w-0 max-w-full">
+                      <button
+                        className="block w-full max-w-full box-border rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-secondary hover:bg-neutral-800 select-none overflow-hidden text-left"
+                        type="button"
+                        onClick={() => onOpenThread && onOpenThread(n.parentId!)}
+                        title={parentPreviewById.get(n.parentId!)!.text}
+                      >
+                        <span className="block overflow-hidden text-ellipsis whitespace-nowrap">{parentPreviewById.get(n.parentId!)!.text}</span>
+                      </button>
                     </div>
                   )}
+                  <HighlightedText className="block whitespace-pre-wrap leading-6 text-primary" text={n.text} query={(quick.text || filter?.params?.textContains || '') as string} />
+                  {n.tags?.length ? (
+                    <div className="mt-2 text-secondary">
+                      {n.tags.join(', ')}
+                    </div>
+                  ) : null}
                 </div>
-              </div>
 
-              {/* Middle body: text */}
-              <div className="px-4 min-w-0">
-                {/* Parent preview chip (only in feed, not in thread replies) */}
-                {parentId == null && (n.parentId ?? null) != null && parentPreviewById.get(n.parentId!) && (
-                  <div className="mb-2 min-w-0 max-w-full">
-                    <button
-                      className="block w-full max-w-full box-border rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-secondary hover:bg-neutral-800 select-none overflow-hidden text-left"
-                      type="button"
-                      onClick={() => onOpenThread && onOpenThread(n.parentId!)}
-                      title={parentPreviewById.get(n.parentId!)!.text}
-                    >
-                      <span className="block overflow-hidden text-ellipsis whitespace-nowrap">{parentPreviewById.get(n.parentId!)!.text}</span>
-                    </button>
-                  </div>
-                )}
-                <HighlightedText className="block whitespace-pre-wrap leading-6 text-primary" text={n.text} query={(quick.text || filter?.params?.textContains || '') as string} />
-                {n.tags?.length ? (
-                  <div className="mt-2 text-secondary">
-                    {n.tags.join(', ')}
-                  </div>
-                ) : null}
-              </div>
-
-              {/* Bottom bar */}
-              <div className="px-4 py-2 text-secondary flex items-center justify-between">
-                <button className="flex items-center gap-2 text-neutral-400 hover:text-neutral-100" title={formatExactDateTime(n.createdAt)} onClick={() => onOpenThread && onOpenThread(n.id!)}>
-                  <span>{n.isDirty ? '✔' : '✔✔'}</span>
-                  <span>{formatRelativeShort(n.createdAt)}</span>
-                </button>
-                <div className="flex items-center gap-3">
-                  { (repliesById.get(n.id!) || 0) > 0 && (
-                    <button className="text-neutral-400 hover:text-neutral-100 transition" type="button" onClick={() => onOpenThread && onOpenThread(n.id!)}>
-                      ({repliesById.get(n.id!)})
-                    </button>
-                  )}
-                  <button className="text-neutral-400 hover:text-neutral-100 transition" type="button" onClick={() => setReplyingForId(replyingForId === n.id ? null : n.id!)}>
-                    Reply
+                {/* Bottom bar */}
+                <div className="px-4 py-2 text-secondary flex items-center justify-between">
+                  <button className="flex items-center gap-2 text-neutral-400 hover:text-neutral-100" title={formatExactDateTime(n.createdAt)} onClick={() => onOpenThread && onOpenThread(n.id!)}>
+                    <span>{n.isDirty ? '✔' : '✔✔'}</span>
+                    <span>{formatRelativeShort(n.createdAt)}</span>
                   </button>
+                  <div className="flex items-center gap-3">
+                    { (repliesById.get(n.id!) || 0) > 0 && (
+                      <button className="text-neutral-400 hover:text-neutral-100 transition" type="button" onClick={() => onOpenThread && onOpenThread(n.id!)}>
+                        ({repliesById.get(n.id!)})
+                      </button>
+                    )}
+                    <button className="text-neutral-400 hover:text-neutral-100 transition" type="button" onClick={() => setReplyingForId(replyingForId === n.id ? null : n.id!)}>
+                      Reply
+                    </button>
+                  </div>
                 </div>
               </div>
-              {replyingForId === n.id && (
-                <div className="px-4 pb-3">
-                  <NoteEditor
-                    value={replyValue}
-                    onChange={setReplyValue}
-                    onSubmit={() => addInlineReply(n, replyValue)}
-                    onCancel={() => setReplyingForId(null)}
-                    mode="reply"
-                    autoCollapse={false}
-                    variant="embedded"
-                    defaultExpanded
-                  />
-                </div>
-              )}
-              {/* No local injection of newly created replies for now */}
-            </>
-          )}
-        </li>
-      ))}
+            )}
+          </li>
+        )
+        // Reply form as a separate full card item below the note
+        if (replyingForId === n.id) {
+          items.push(
+            <li key={`reply-form-${n.id}`}>
+              <NoteEditor
+                value={replyValue}
+                onChange={setReplyValue}
+                onSubmit={() => addInlineReply(n, replyValue)}
+                onCancel={() => setReplyingForId(null)}
+                mode="reply"
+                autoCollapse={false}
+                variant="card"
+                defaultExpanded
+                spaceId={spaceId}
+              />
+            </li>
+          )
+        }
+        return items
+      })}
       {notes.length === 0 && <li className="text-secondary">No notes</li>}
     </ul>
   )
