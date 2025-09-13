@@ -6,6 +6,7 @@ import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login
 import { updateNoteLocal } from './lib/sync'
 import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
 import HighlightedText from './components/HighlightedText'
+import Toasts from './components/Toasts'
 import { formatRelativeShort } from './lib/time'
 import { formatExactDateTime } from './lib/time'
 import NoteEditor, { type NoteEditorValue } from './components/NoteEditor'
@@ -367,6 +368,11 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
   async function removeNote(id: number) {
     await deleteNote(id)
     window.dispatchEvent(new Event('focuz:local-write'))
+    // Toast with undo
+    try {
+      const { addToast } = await import('./lib/toast')
+      addToast({ message: 'Note deleted', action: { type: 'undo-delete-note', label: 'Undo', payload: { noteId: id } } })
+    } catch {}
   }
 
   async function saveEdit(id: number, value: { text: string; tags: string[] }) {
@@ -737,6 +743,7 @@ function App() {
       {drawerOpen && <SpaceDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} currentId={currentSpaceId} onSelected={(id) => { openSpace(id) }} />}
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
       {needReauth && <ReauthOverlay onDone={() => setNeedReauth(false)} />}
+      <Toasts />
     </div>
   )
 }
