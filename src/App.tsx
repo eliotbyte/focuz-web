@@ -10,11 +10,15 @@ import { formatRelativeShort } from './lib/time'
 import { formatExactDateTime } from './lib/time'
 import NoteEditor, { type NoteEditorValue } from './components/NoteEditor'
 
-function TopBar({ onOpenSpaces, onOpenSettings, onLogout }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void }) {
+function TopBar({ onOpenSpaces, onOpenSettings, onLogout, isThread, onBack }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void; isThread?: boolean; onBack?: () => void }) {
   return (
     <header className="flex items-center justify-between py-2">
       <div className="flex items-center gap-2">
-        <button className="button" onClick={onOpenSpaces}>☰</button>
+        {isThread ? (
+          <button className="button" onClick={onBack}>←</button>
+        ) : (
+          <button className="button" onClick={onOpenSpaces}>☰</button>
+        )}
         <h1 className="text-xl font-semibold">focuz</h1>
       </div>
       <div className="flex items-center gap-2">
@@ -705,7 +709,7 @@ function App() {
 
   return (
     <div className="container space-y-4">
-      <TopBar onOpenSpaces={() => setDrawerOpen(true)} onOpenSettings={() => setSettingsOpen(true)} onLogout={() => { logout(); setAuthed(false) }} />
+      <TopBar onOpenSpaces={() => setDrawerOpen(true)} onOpenSettings={() => setSettingsOpen(true)} onLogout={() => { logout(); setAuthed(false) }} isThread={!!currentNoteId} onBack={goBack} />
       <div className="flex gap-4">
         {left}
         {center}
@@ -730,15 +734,12 @@ function App() {
 }
 
 // Thread view components
-function SingleNoteCard({ note, onBack, onEdit, onDelete, onOpenThread }: { note: NoteRecord; onBack: () => void; onEdit: () => void; onDelete: () => void; onOpenThread: (nid: number) => void }) {
+function SingleNoteCard({ note, onEdit, onDelete, onOpenThread }: { note: NoteRecord; onEdit: () => void; onDelete: () => void; onOpenThread: (nid: number) => void }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const parentNote = useLiveQuery(() => note.parentId ? db.notes.get(note.parentId) : Promise.resolve(undefined), [note.parentId]) as NoteRecord | undefined
   return (
     <div className="card-nopad">
       <div className="h-[30px] relative">
-        <div className="absolute left-4 top-0 h-[30px] flex items-center">
-          <button className="px-1 text-neutral-400 hover:text-neutral-100 h-[30px]" onClick={onBack} aria-label="Back">←</button>
-        </div>
         <div className="absolute right-4 top-0 h-[30px] flex items-center">
           <button className="px-1 text-neutral-400 hover:text-neutral-100 h-[30px]" onClick={() => setMenuOpen(s => !s)} aria-label="Open menu">⋯</button>
           {menuOpen && (
@@ -845,7 +846,7 @@ function NoteThread({ spaceId, noteId, onBack, onOpenThread }: { spaceId: number
       {editing ? (
         <NoteEditor value={editValue} onChange={setEditValue} onSubmit={saveEdit} onCancel={() => setEditing(false)} mode="edit" autoCollapse={false} spaceId={spaceId} />
       ) : (
-        <SingleNoteCard note={mainNote} onBack={onBack} onEdit={() => setEditing(true)} onDelete={removeMain} onOpenThread={onOpenThread} />
+        <SingleNoteCard note={mainNote} onEdit={() => setEditing(true)} onDelete={removeMain} onOpenThread={onOpenThread} />
       )}
       <ReplyComposer spaceId={spaceId} parentId={noteId} />
       <div className="min-w-0">
