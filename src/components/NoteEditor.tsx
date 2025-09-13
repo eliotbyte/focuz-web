@@ -17,6 +17,7 @@ export default function NoteEditor({
   autoCollapse = true,
   variant = 'card',
   defaultExpanded,
+  spaceId,
 }: {
   value: NoteEditorValue
   onChange: (v: NoteEditorValue) => void
@@ -26,6 +27,7 @@ export default function NoteEditor({
   autoCollapse?: boolean
   variant?: 'card' | 'embedded'
   defaultExpanded?: boolean
+  spaceId?: number
 }) {
   const [expanded, setExpanded] = useState<boolean>(
     typeof defaultExpanded === 'boolean' ? defaultExpanded : (mode !== 'create' ? true : false)
@@ -67,7 +69,7 @@ export default function NoteEditor({
         value={value.text}
         onChange={e => onChange({ ...value, text: e.target.value })}
       />
-      <TagsInput value={value.tags} onChange={tags => onChange({ ...value, tags })} placeholder="Add tags" />
+      <TagsInput value={value.tags} onChange={tags => onChange({ ...value, tags })} placeholder="Add tags" spaceId={spaceId} />
       <div className="flex justify-end gap-2">
         {onCancel && (
           <button className="button" onClick={() => { onCancel(); collapseIfNeeded() }}>Cancel</button>

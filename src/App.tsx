@@ -245,7 +245,7 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
   }
 
   return (
-    <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onCancel={() => setValue({ text: '', tags: [] })} mode="create" />
+    <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onCancel={() => setValue({ text: '', tags: [] })} mode="create" spaceId={spaceId} />
   )
 }
 
@@ -410,6 +410,7 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
               mode="edit"
               autoCollapse={false}
               variant="embedded"
+              spaceId={spaceId}
             />
           ) : (
             <>
@@ -802,7 +803,7 @@ function ReplyComposer({ spaceId, parentId }: { spaceId: number; parentId: numbe
     setValue({ text: '', tags: [] })
   }
   return (
-    <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onCancel={() => setValue({ text: '', tags: [] })} mode="reply" defaultExpanded={false} />
+    <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onCancel={() => setValue({ text: '', tags: [] })} mode="reply" defaultExpanded={false} spaceId={spaceId} />
   )
 }
 
@@ -842,7 +843,7 @@ function NoteThread({ spaceId, noteId, onBack, onOpenThread }: { spaceId: number
   return (
     <div className="flex-1 min-w-0 space-y-[15px]">
       {editing ? (
-        <NoteEditor value={editValue} onChange={setEditValue} onSubmit={saveEdit} onCancel={() => setEditing(false)} mode="edit" autoCollapse={false} />
+        <NoteEditor value={editValue} onChange={setEditValue} onSubmit={saveEdit} onCancel={() => setEditing(false)} mode="edit" autoCollapse={false} spaceId={spaceId} />
       ) : (
         <SingleNoteCard note={mainNote} onBack={onBack} onEdit={() => setEditing(true)} onDelete={removeMain} onOpenThread={onOpenThread} />
       )}
