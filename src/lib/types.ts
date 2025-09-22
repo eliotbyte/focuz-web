@@ -29,6 +29,35 @@ export interface NoteRecord {
   isDirty: 0 | 1
 }
 
+export interface AttachmentRecord {
+  id?: number
+  serverId?: string | null
+  noteId: number
+  fileName: string
+  fileType: string
+  fileSize: number
+  // locally cached transformed image data (WebP). May be absent until downloaded
+  data?: Blob | null
+  createdAt: string
+  modifiedAt: string
+  deletedAt?: string | null
+  isDirty: 0 | 1
+}
+
+export type JobStatus = 'pending' | 'running' | 'failed'
+export type JobKind = 'attachment-upload' | 'attachment-download'
+
+export interface JobRecord {
+  id?: number
+  kind: JobKind
+  attachmentId: number
+  priority: number
+  status: JobStatus
+  attempts: number
+  createdAt: string
+  updatedAt: string
+}
+
 export interface TagRecord {
   id?: number
   serverId?: number | null

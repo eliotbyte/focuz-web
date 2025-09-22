@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG NODE_VERSION=20.18.1
+ARG NODE_VERSION=20.19.0
 ARG NGINX_IMAGE=nginx:1.27-alpine
 
 # 1) Dependencies layer

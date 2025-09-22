@@ -1,5 +1,5 @@
-import { db, getKV, setKV, wipeLocalData } from './db'
-import type { FilterRecord, NoteRecord, SpaceRecord, TagRecord } from './types'
+import { db, getKV, setKV, wipeLocalData, deleteDatabase, deleteDatabaseWithRetry, ensureDbOpen } from './db'
+import type { FilterRecord, NoteRecord, SpaceRecord, TagRecord, AttachmentRecord, JobRecord } from './types'
 
 const API_BASE = (import.meta as any).env.VITE_API_BASE_URL as string | undefined
 const BASE_SYNC_INTERVAL_MS = Number(((import.meta as any).env.VITE_SYNC_INTERVAL_MS ?? '60000')) || 60000
@@ -86,11 +86,26 @@ async function api(path: string, init?: RequestInit) {
   return res.json()
 }
 
+async function apiMultipart(path: string, form: FormData): Promise<any> {
+  if (!API_BASE) throw new Error('Missing VITE_API_BASE_URL')
+  const token = getAuthToken()
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(`${API_BASE}${path}`, { method: 'POST', body: form, headers })
+  if (!res.ok) {
+    if (navigator.onLine && res.status === 401) { emitAuthRequired(true); throw new Error('AUTH_REQUIRED') }
+    throw new Error(`${res.status} ${res.statusText}`)
+  }
+  return res.json()
+}
+
 export async function register(username: string, password: string): Promise<void> {
   await api('/register', { method: 'POST', body: JSON.stringify({ username, password }) })
 }
 
 export async function login(username: string, password: string): Promise<void> {
+  // Reopen DB after previous logout/delete cycle
+  await ensureDbOpen().catch(() => {})
   const resp = await api('/login', { method: 'POST', body: JSON.stringify({ username, password }) })
   const token = resp?.data?.token as string
   if (!token) throw new Error('No token')
@@ -105,8 +120,17 @@ export function getLastUsername(): string | undefined {
 
 export function logout(): void {
   try { localStorage.removeItem(TOKEN_KV) } catch {}
-  wipeLocalData().catch(() => {})
-  setKV(CURRENT_SPACE_KV, undefined).catch(() => {})
+  try { authBC?.postMessage({ type: 'logout' }) } catch {}
+  // Best-effort full DB drop to avoid stale state across sessions
+  deleteDatabase().catch(() => { wipeLocalData().catch(() => {}) })
+  // Do not write to IndexedDB after deletion, or it will be recreated empty
+}
+
+export async function purgeAndLogout(): Promise<void> {
+  try { teardownSync() } catch {}
+  try { localStorage.removeItem(TOKEN_KV) } catch {}
+  try { authBC?.postMessage({ type: 'logout' }) } catch {}
+  try { await deleteDatabaseWithRetry(4000) } catch { try { await wipeLocalData() } catch {} }
 }
 
 export function isAuthenticated(): boolean {
@@ -187,6 +211,68 @@ export async function updateNoteLocal(localId: number, changes: { text?: string;
   await db.notes.update(localId, { ...changes, modifiedAt: now, isDirty: 1 })
 }
 
+export async function addLocalAttachment(noteId: number, file: File): Promise<number> {
+  const now = new Date().toISOString()
+  const id = await db.attachments.add({
+    noteId,
+    serverId: null,
+    fileName: file.name,
+    fileType: file.type,
+    fileSize: file.size,
+    data: file,
+    createdAt: now,
+    modifiedAt: now,
+    deletedAt: null,
+    isDirty: 1,
+  } as AttachmentRecord)
+  await db.jobs.add({
+    kind: 'attachment-upload',
+    attachmentId: id,
+    priority: 5,
+    status: 'pending',
+    attempts: 0,
+    createdAt: now,
+    updatedAt: now,
+  })
+  try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+  return id
+}
+
+export async function deleteLocalAttachment(attachmentLocalId: number): Promise<void> {
+  const now = new Date().toISOString()
+  const att = await db.attachments.get(attachmentLocalId)
+  if (!att) return
+  await db.transaction('rw', db.attachments, db.notes, async () => {
+    await db.attachments.update(attachmentLocalId, { deletedAt: now, modifiedAt: now, isDirty: 1 })
+    // Touch parent note so /sync will accept attachment edits
+    const note = await db.notes.get(att.noteId)
+    if (note?.id) {
+      await db.notes.update(note.id, { modifiedAt: now, isDirty: 1 })
+    }
+  })
+  try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+}
+
+export async function reorderNoteAttachments(noteId: number, orderedAttachmentLocalIds: number[]): Promise<void> {
+  // Assign increasing modifiedAt to reflect new order; smallest first
+  const base = Date.now()
+  await db.transaction('rw', db.attachments, db.notes, async () => {
+    for (let i = 0; i < orderedAttachmentLocalIds.length; i++) {
+      const id = orderedAttachmentLocalIds[i]
+      const ts = new Date(base + i).toISOString()
+      const att = await db.attachments.get(id)
+      if (!att || att.deletedAt) continue
+      // Only server-backed attachments participate in server reordering; still update locals for UX
+      await db.attachments.update(id, { modifiedAt: ts, isDirty: (att.serverId ? 1 : att.isDirty) as 0 | 1 })
+    }
+    const note = await db.notes.get(noteId)
+    if (note?.id) {
+      await db.notes.update(note.id, { modifiedAt: new Date(base + orderedAttachmentLocalIds.length).toISOString(), isDirty: 1 })
+    }
+  })
+  try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+}
+
 function toNoteChange(n: NoteRecord) {
   return {
     id: n.serverId ?? null,
@@ -234,6 +320,7 @@ async function pushDirty() {
   const notes = await db.notes.where('isDirty').equals(1).toArray()
   const filters = await db.filters.where('isDirty').equals(1).toArray()
   const tags = await db.tags.where('isDirty').equals(1).toArray()
+  const attachments = await db.attachments.where('isDirty').equals(1).toArray()
 
   // Fallback: call deprecated delete endpoint for server-backed notes with deletedAt
   const deletions = notes.filter(n => n.deletedAt && n.serverId)
@@ -248,7 +335,7 @@ async function pushDirty() {
 
   const remainingNotes = await db.notes.where('isDirty').equals(1).toArray()
   const notesForSync = remainingNotes
-  if (notesForSync.length + filters.length + tags.length === 0) return { applied: 0 }
+  if (notesForSync.length + filters.length + tags.length + attachments.length === 0) return { applied: 0 }
 
   const spaceServerIdByLocal = new Map<number, number>()
   async function toServerSpaceId(localId: number): Promise<number> {
@@ -258,7 +345,34 @@ async function pushDirty() {
     return sid
   }
 
-  const notesPayload = await Promise.all(notesForSync.map(async (n) => ({ ...toNoteChange(n), space_id: await toServerSpaceId(n.spaceId) })))
+  // Group dirty attachments by note localId
+  const dirtyByNoteLocal = new Map<number, AttachmentRecord[]>()
+  for (const a of attachments) {
+    if (!dirtyByNoteLocal.has(a.noteId)) dirtyByNoteLocal.set(a.noteId, [])
+    dirtyByNoteLocal.get(a.noteId)!.push(a)
+  }
+  // Ensure notes for which attachments are dirty are included in notesForSync
+  for (const [noteLocalId] of dirtyByNoteLocal) {
+    if (!notesForSync.find(n => n.id === noteLocalId)) {
+      const note = await db.notes.get(noteLocalId)
+      if (note) notesForSync.push(note)
+    }
+  }
+  const notesPayload = await Promise.all(notesForSync.map(async (n) => {
+    const space_id = await toServerSpaceId(n.spaceId)
+    const base = { ...toNoteChange(n), space_id }
+    const atts = dirtyByNoteLocal.get(n.id!) || []
+    if (atts.length === 0) return base
+    // Build minimal attachment updates: only server-backed items matter to server
+    const attPayload = atts
+      .filter(a => !!a.serverId)
+      .map(a => ({
+        id: a.serverId as string,
+        modified_at: a.modifiedAt,
+        is_deleted: !!a.deletedAt,
+      }))
+    return attPayload.length > 0 ? { ...base, attachments: attPayload } : base
+  }))
   const filtersPayload = await Promise.all(filters.map(async (f) => ({ ...toFilterChange(f), space_id: await toServerSpaceId(f.spaceId) })))
   const tagsPayload = await Promise.all(tags.map(async (t) => ({ ...toTagChange(t), space_id: await toServerSpaceId(t.spaceId) })))
 
@@ -269,10 +383,11 @@ async function pushDirty() {
 
   const mappings: Array<{ resource: string; clientId: string; serverId: number }> = resp?.data?.mappings ?? []
 
-  await db.transaction('rw', db.notes, db.filters, db.tags, async () => {
+  await db.transaction('rw', db.notes, db.filters, db.tags, db.attachments, async () => {
     for (const n of notesForSync) await db.notes.update(n.id!, { isDirty: 0 })
     for (const f of filters) await db.filters.update(f.id!, { isDirty: 0 })
     for (const t of tags) await db.tags.update(t.id!, { isDirty: 0 })
+    for (const a of attachments) await db.attachments.update(a.id!, { isDirty: 0 })
     for (const m of mappings) {
       if (m.resource === 'note' || m.resource === 'notes') {
         const local = await db.notes.where('clientId').equals(m.clientId).first()
@@ -309,9 +424,15 @@ async function pullSince() {
   for (const n of (data.notes ?? [])) updateMax(n.modified_at)
   for (const t of (data.tags ?? [])) updateMax(t.modified_at ?? t.created_at)
   for (const f of (data.filters ?? [])) updateMax(f.modified_at)
+  for (const a of (data.attachments ?? [])) updateMax(a.modified_at ?? a.created_at)
+  for (const n of (data.notes ?? [])) {
+    if (Array.isArray(n.attachments)) {
+      for (const a of n.attachments) updateMax(a.modified_at ?? a.created_at)
+    }
+  }
 
   let pulled = 0
-  await db.transaction('rw', db.spaces, db.notes, db.tags, db.filters, async () => {
+  await db.transaction('rw', [db.spaces, db.notes, db.tags, db.filters, db.attachments, db.jobs] as any, async () => {
     for (const s of (data.spaces ?? [])) {
       pulled++
       const existing = await db.spaces.where('serverId').equals(s.id).first()
@@ -389,6 +510,46 @@ async function pullSince() {
       if (existing) await db.filters.put(rec)
       else await db.filters.add(rec)
     }
+
+    const upsertAttachment = async (a: any) => {
+      pulled++
+      const existing = await db.attachments.where('serverId').equals(a.id).first()
+      const noteLocalId = (await db.notes.where('serverId').equals(a.note_id).first())?.id
+      if (!noteLocalId) return
+      const rec: AttachmentRecord = {
+        id: existing?.id,
+        serverId: a.id,
+        noteId: noteLocalId,
+        fileName: a.file_name,
+        fileType: a.file_type,
+        fileSize: a.file_size,
+        data: existing?.data ?? null,
+        createdAt: a.created_at,
+        modifiedAt: a.modified_at,
+        deletedAt: null,
+        isDirty: 0,
+      }
+      const attId = existing ? (await db.attachments.put(rec)) : (await db.attachments.add(rec))
+      // remove any local duplicates for the same note with same fileName+fileSize and null serverId
+      const dups = await db.attachments.where('noteId').equals(noteLocalId).filter(x => !x.serverId && x.fileName === rec.fileName && x.fileSize === rec.fileSize).toArray()
+      for (const d of dups) {
+        if (!rec.data && d.data) {
+          await db.attachments.update(attId, { data: d.data })
+        }
+        await db.attachments.delete(d.id!)
+      }
+    }
+
+    for (const a of (data.attachments ?? [])) {
+      await upsertAttachment(a)
+    }
+    for (const n of (data.notes ?? [])) {
+      for (const a of (n.attachments ?? [])) {
+        // include parent note id if not present
+        a.note_id = a.note_id ?? n.id
+        await upsertAttachment(a)
+      }
+    }
   })
 
   await setKV(LAST_SYNC_KV, maxSyncAt)
@@ -407,7 +568,17 @@ let backoffUntilMs = 0
 let lastSyncAtMs = 0
 let lastWSTriggerMs = 0
 
+// Background control & cleanup handles
+let stopRequested = false
+let baselineIntervalId: number | null = null
+let wsRetryTimeoutId: number | null = null
+let onOnline: (() => void) | null = null
+let onFocus: (() => void) | null = null
+let onVisibilityChange: (() => void) | null = null
+let lastCleanup: (() => void) | null = null
+
 export async function runSync(force = false): Promise<void> {
+  if (stopRequested) return
   const now = Date.now()
   if (!force && now < backoffUntilMs) return
   if (syncRunning) { syncQueued = true; return }
@@ -431,23 +602,26 @@ export async function runSync(force = false): Promise<void> {
 }
 
 export function scheduleAutoSync() {
+  stopRequested = false
   const kick = () => {
     if (syncTimer) window.clearTimeout(syncTimer)
     syncTimer = window.setTimeout(() => runSync(true), DEBOUNCE_LOCAL_MS)
   }
 
-  window.addEventListener('online', () => runSync())
-  window.addEventListener('focus', () => { runSync(); /* no forced */ })
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { runSync() }
-  })
+  onOnline = () => runSync()
+  onFocus = () => { runSync() }
+  onVisibilityChange = () => { if (document.visibilityState === 'visible') { runSync() } }
+  window.addEventListener('online', onOnline)
+  window.addEventListener('focus', onFocus)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 
   // Periodic baseline sync
-  window.setInterval(() => runSync(), BASE_SYNC_INTERVAL_MS)
+  baselineIntervalId = window.setInterval(() => runSync(), BASE_SYNC_INTERVAL_MS)
 
   // Best-effort websocket to get nudges from server when other sessions push
   const connectWS = () => {
     try {
+      if (stopRequested) return
       if (!API_BASE) return
       const token = getAuthToken()
       if (!token) return
@@ -464,21 +638,134 @@ export function scheduleAutoSync() {
       }
       ws.onclose = () => {
         ws = null
-        setTimeout(connectWS, wsRetryMs)
+        if (stopRequested) return
+        wsRetryTimeoutId = window.setTimeout(connectWS, wsRetryMs)
         wsRetryMs = Math.min(wsRetryMs * 2, 30000)
       }
       ws.onerror = () => { try { ws?.close() } catch {} }
     } catch {
-      setTimeout(connectWS, wsRetryMs)
+      if (stopRequested) return
+      wsRetryTimeoutId = window.setTimeout(connectWS, wsRetryMs)
       wsRetryMs = Math.min(wsRetryMs * 2, 30000)
     }
   }
 
   connectWS()
-  return { kick }
+  // also start background job processing loop
+  startJobWorker()
+  const cleanup = () => {
+    stopRequested = true
+    if (syncTimer) { window.clearTimeout(syncTimer); syncTimer = null }
+    if (jobTimer) { window.clearTimeout(jobTimer); jobTimer = null }
+    if (baselineIntervalId) { window.clearInterval(baselineIntervalId); baselineIntervalId = null }
+    if (ws) { try { ws.close(1000, 'logout') } catch {}; ws = null }
+    if (wsRetryTimeoutId) { window.clearTimeout(wsRetryTimeoutId); wsRetryTimeoutId = null }
+    if (onOnline) { window.removeEventListener('online', onOnline); onOnline = null }
+    if (onFocus) { window.removeEventListener('focus', onFocus); onFocus = null }
+    if (onVisibilityChange) { document.removeEventListener('visibilitychange', onVisibilityChange); onVisibilityChange = null }
+  }
+  lastCleanup = cleanup
+  return { kick, cleanup }
+}
+
+async function processOneJob(): Promise<boolean> {
+  if (stopRequested) return false
+  if (!navigator.onLine || isAuthRequired() || !getAuthToken()) return false
+  const job = await db.jobs.orderBy('priority').first()
+  if (!job) return false
+  await db.jobs.update(job.id!, { status: 'running', updatedAt: new Date().toISOString() })
+  try {
+    if (job.kind === 'attachment-upload') {
+      const att = await db.attachments.get(job.attachmentId)
+      if (!att || att.deletedAt) throw new Error('Attachment missing')
+      const note = await db.notes.get(att.noteId)
+      if (!note?.serverId) return false // wait until note mapped to server
+      const form = new FormData()
+      const blob = (att.data as Blob) || new Blob()
+      form.append('file', blob, att.fileName)
+      form.append('note_id', String(note.serverId))
+      const resp = await apiMultipart('/upload', form)
+      const serverId = (resp?.data?.attachment_id as string | undefined) || (resp?.data?.id as string | undefined)
+      await db.transaction('rw', db.attachments, async () => {
+        if (serverId) {
+          // If another record with same serverId already exists (from pull), merge and dedupe
+          const existing = await db.attachments.where('serverId').equals(serverId).first()
+          if (existing && existing.id !== att.id) {
+            const preferCurrent = !!att.data && !existing.data
+            const source = preferCurrent ? att : existing
+            const target = preferCurrent ? existing : att
+            // Move data if needed
+            if (!target.data && source.data) {
+              await db.attachments.update(target.id!, { data: source.data })
+            }
+            // Ensure serverId set on target
+            await db.attachments.update(target.id!, { serverId, isDirty: 0 })
+            // Remove the duplicate source record
+            await db.attachments.delete(source.id!)
+          } else {
+            await db.attachments.update(att.id!, { serverId, isDirty: 0 })
+          }
+        } else {
+          await db.attachments.update(att.id!, { isDirty: 0 })
+        }
+      })
+    } else if (job.kind === 'attachment-download') {
+      const att = await db.attachments.get(job.attachmentId)
+      if (!att?.serverId) { await db.jobs.delete(job.id!); return true }
+      // get signed URL
+      const meta = await api(`/files/${encodeURIComponent(att.serverId)}`, { method: 'GET' })
+      const url = meta?.data?.url || meta?.data?.URL || meta?.data?.signedUrl || meta?.data?.signed_url
+      if (!url) throw new Error('No URL')
+      const res = await fetch(url)
+      if (!res.ok) throw new Error('Download failed')
+      const blob = await res.blob()
+      await db.attachments.update(att.id!, { data: blob, modifiedAt: new Date().toISOString() })
+    }
+    await db.jobs.delete(job.id!)
+    return true
+  } catch (e) {
+    const attempts = (job.attempts ?? 0) + 1
+    await db.jobs.update(job.id!, { status: 'failed', attempts, updatedAt: new Date().toISOString() })
+    return false
+  }
+}
+
+let jobTimer: number | null = null
+function startJobWorker() {
+  const tick = async () => {
+    const did = await processOneJob()
+    const delay = did ? 0 : 2000
+    jobTimer = window.setTimeout(tick, delay)
+  }
+  if (jobTimer) window.clearTimeout(jobTimer)
+  tick()
+}
+
+async function ensureDownloadJob(attachmentLocalId: number, priority = 10): Promise<void> {
+  // Skip if job already exists
+  const existing = await db.jobs.where('attachmentId').equals(attachmentLocalId).filter(j => j.kind === 'attachment-download').first()
+  if (existing) return
+  // Ensure attachment exists and its parent note is not deleted
+  const att = await db.attachments.get(attachmentLocalId)
+  if (!att) return
+  const note = await db.notes.get(att.noteId)
+  if (!note || !!note.deletedAt) return
+  const now = new Date().toISOString()
+  await db.jobs.add({ kind: 'attachment-download', attachmentId: attachmentLocalId, priority, status: 'pending', attempts: 0, createdAt: now, updatedAt: now } as JobRecord)
+}
+
+const prefetchCooldownMs = 5000
+const lastPrefetchByAttachment = new Map<number, number>()
+export async function requestAttachmentPrefetch(attachmentLocalId: number, priority = 1): Promise<void> {
+  const now = Date.now()
+  const last = lastPrefetchByAttachment.get(attachmentLocalId) || 0
+  if (now - last < prefetchCooldownMs) return
+  lastPrefetchByAttachment.set(attachmentLocalId, now)
+  await ensureDownloadJob(attachmentLocalId, priority)
 }
 
 export async function setAuthToken(token: string) {
+  await ensureDbOpen().catch(() => {})
   localStorage.setItem(TOKEN_KV, token)
   emitAuthRequired(false)
   await runSync(true)
@@ -489,3 +776,22 @@ export async function getCurrentSpaceId(): Promise<number> {
   if (id) return id
   return ensureDefaultSpace()
 } 
+
+export function teardownSync(): void {
+  stopRequested = true
+  if (lastCleanup) {
+    try { lastCleanup() } catch {}
+    lastCleanup = null
+  }
+}
+
+// Cross-tab listener to stop background work and drop DB on logout elsewhere
+try {
+  authBC?.addEventListener('message', (msg: MessageEvent) => {
+    if (msg?.data?.type === 'logout') {
+      try { teardownSync() } catch {}
+      deleteDatabaseWithRetry(4000).catch(() => { wipeLocalData().catch(() => {}) })
+      try { emitAuthRequired(true) } catch {}
+    }
+  })
+} catch {}

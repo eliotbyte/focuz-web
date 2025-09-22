@@ -2,14 +2,12 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db, setKV, getKV } from './lib/db'
 import type { NoteRecord, FilterRecord, SpaceRecord } from './lib/types'
-import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote, onAuthRequired, isAuthRequired, getLastUsername } from './lib/sync'
+import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote, onAuthRequired, isAuthRequired, getLastUsername, addLocalAttachment, teardownSync, purgeAndLogout } from './lib/sync'
 import { updateNoteLocal } from './lib/sync'
 import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
-import HighlightedText from './components/HighlightedText'
 import Toasts from './components/Toasts'
-import { formatRelativeShort } from './lib/time'
-import { formatExactDateTime } from './lib/time'
 import NoteEditor, { type NoteEditorValue } from './components/NoteEditor'
+import NoteCard from './components/NoteCard'
 
 function TopBar({ onOpenSpaces, onOpenSettings, onLogout, isThread, onBack }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void; isThread?: boolean; onBack?: () => void }) {
   return (
@@ -249,14 +247,42 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
     setValue({ text: '', tags: [] })
   }
 
+  async function addNoteWithAttachments(extra: { attachments?: File[] }) {
+    if (!canAdd) return
+    const now = new Date().toISOString()
+    const noteId = await db.notes.add({
+      spaceId,
+      title: null,
+      text: value.text.trim(),
+      tags: value.tags,
+      createdAt: now,
+      modifiedAt: now,
+      date: now,
+      parentId: null,
+      deletedAt: null,
+      isDirty: 1,
+      serverId: null,
+      clientId: crypto.randomUUID(),
+    } as NoteRecord)
+
+    const files = (extra.attachments ?? []).slice(0, 10)
+    for (const f of files) {
+      try {
+        await addLocalAttachment(noteId, f)
+      } catch {}
+    }
+
+    window.dispatchEvent(new Event('focuz:local-write'))
+    setValue({ text: '', tags: [] })
+  }
+
   return (
-    <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onCancel={() => setValue({ text: '', tags: [] })} mode="create" spaceId={spaceId} />
+    <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onSubmitWithExtra={addNoteWithAttachments} onCancel={() => setValue({ text: '', tags: [] })} mode="create" spaceId={spaceId} />
   )
 }
 
 function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId: number; filter: FilterRecord | null; quick: { text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }; parentId?: number | null; onOpenThread?: (noteId: number) => void }) {
   const [idsBySearch, setIdsBySearch] = useState<number[] | null>(null)
-  const [menuOpenId, setMenuOpenId] = useState<number | null>(null)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editingValue, setEditingValue] = useState<{ text: string; tags: string[] }>({ text: '', tags: [] })
   const [replyingForId, setReplyingForId] = useState<number | null>(null)
@@ -329,28 +355,7 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
     return result
   }, [spaceId, JSON.stringify(filter?.params ?? {}), JSON.stringify(quick), JSON.stringify(idsBySearch), parentId ?? null]) ?? []
 
-  // Parent previews for feed (not for thread replies)
-  const parentIds = useMemo(() => {
-    if (parentId != null) return [] as number[]
-    const set = new Set<number>()
-    for (const n of notes) {
-      const pid = n.parentId ?? null
-      if (pid != null) set.add(pid)
-    }
-    return Array.from(set)
-  }, [notes, parentId])
-  const parentPreviewById = useLiveQuery(async () => {
-    if (!parentIds.length) return new Map<number, NoteRecord>()
-    const rows = await db.notes.bulkGet(parentIds)
-    const map = new Map<number, NoteRecord>()
-    parentIds.forEach((id, i) => {
-      const rec = rows[i]
-      if (rec && !rec.deletedAt) map.set(id, rec)
-    })
-    return map
-  }, [JSON.stringify(parentIds)]) || new Map<number, NoteRecord>()
-
-  // Count replies across the whole space, not only the filtered list
+  // Parent previews no longer preloaded here; NoteCard handles parent preview on demand
   const repliesById = useLiveQuery(async () => {
     const all = await db.notes
       .where('spaceId')
@@ -377,6 +382,16 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
 
   async function saveEdit(id: number, value: { text: string; tags: string[] }) {
     await updateNoteLocal(id, { text: value.text.trim(), tags: value.tags })
+    window.dispatchEvent(new Event('focuz:local-write'))
+    setEditingId(null)
+  }
+
+  async function saveEditWithAttachments(id: number, value: { text: string; tags: string[] }, extra?: { attachments?: File[] }) {
+    await updateNoteLocal(id, { text: value.text.trim(), tags: value.tags })
+    const files = (extra?.attachments ?? []).slice(0, 10)
+    for (const f of files) {
+      try { await addLocalAttachment(id, f) } catch {}
+    }
     window.dispatchEvent(new Event('focuz:local-write'))
     setEditingId(null)
   }
@@ -419,64 +434,24 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
                 value={editingValue}
                 onChange={setEditingValue}
                 onSubmit={() => saveEdit(n.id!, editingValue)}
+                onSubmitWithExtra={(extra) => saveEditWithAttachments(n.id!, editingValue, extra)}
                 onCancel={() => setEditingId(null)}
                 mode="edit"
                 autoCollapse={false}
                 variant="card"
                 spaceId={spaceId}
+                noteId={n.id!}
               />
             ) : (
-              <div className="card-nopad">
-                {/* Top bar (30px height) */}
-                <div className="h-[30px] relative">
-                  <div className="absolute right-4 top-0 h-[30px] flex items-center">
-                    <button
-                      className="px-1 text-neutral-400 hover:text-neutral-100 h-[30px]"
-                      onClick={() => setMenuOpenId(menuOpenId === n.id ? null : n.id!)}
-                      aria-label="Open menu"
-                    >
-                      ⋯
-                    </button>
-                    {menuOpenId === n.id && (
-                      <div className="absolute right-0 mt-1 z-10 rounded border border-neutral-800 bg-neutral-900 shadow-lg">
-                        <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpenId(null); setEditingId(n.id!); setEditingValue({ text: n.text, tags: n.tags || [] }) }}>Edit</button>
-                        <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpenId(null); removeNote(n.id!) }}>Delete</button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Middle body: text */}
-                <div className="px-4 min-w-0">
-                  {/* Parent preview chip (only in feed, not in thread replies) */}
-                  {parentId == null && (n.parentId ?? null) != null && parentPreviewById.get(n.parentId!) && (
-                    <div className="mb-2 min-w-0 max-w-full">
-                      <button
-                        className="block w-full max-w-full box-border rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-secondary hover:bg-neutral-800 select-none overflow-hidden text-left"
-                        type="button"
-                        onClick={() => onOpenThread && onOpenThread(n.parentId!)}
-                        title={parentPreviewById.get(n.parentId!)!.text}
-                      >
-                        <span className="block overflow-hidden text-ellipsis whitespace-nowrap">{parentPreviewById.get(n.parentId!)!.text}</span>
-                      </button>
-                    </div>
-                  )}
-                  <HighlightedText className="block whitespace-pre-wrap leading-6 text-primary" text={n.text} query={(quick.text || filter?.params?.textContains || '') as string} />
-                  {n.tags?.length ? (
-                    <div className="mt-2 text-secondary">
-                      {n.tags.join(', ')}
-                    </div>
-                  ) : null}
-                </div>
-
-                {/* Bottom bar */}
-                <div className="px-4 py-2 text-secondary flex items-center justify-between">
-                  <button className="flex items-center gap-2 text-neutral-400 hover:text-neutral-100" title={formatExactDateTime(n.createdAt)} onClick={() => onOpenThread && onOpenThread(n.id!)}>
-                    <span>{n.isDirty ? '✔' : '✔✔'}</span>
-                    <span>{formatRelativeShort(n.createdAt)}</span>
-                  </button>
-                  <div className="flex items-center gap-3">
-                    { (repliesById.get(n.id!) || 0) > 0 && (
+              <NoteCard
+                note={n}
+                onEdit={() => { setEditingId(n.id!); setEditingValue({ text: n.text, tags: n.tags || [] }) }}
+                onDelete={() => { removeNote(n.id!) }}
+                onOpenThread={onOpenThread}
+                showParentPreview={parentId == null && (n.parentId ?? null) != null}
+                childrenRight={
+                  <>
+                    {(repliesById.get(n.id!) || 0) > 0 && (
                       <button className="text-neutral-400 hover:text-neutral-100 transition" type="button" onClick={() => onOpenThread && onOpenThread(n.id!)}>
                         ({repliesById.get(n.id!)})
                       </button>
@@ -484,9 +459,9 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
                     <button className="text-neutral-400 hover:text-neutral-100 transition" type="button" onClick={() => setReplyingForId(replyingForId === n.id ? null : n.id!)}>
                       Reply
                     </button>
-                  </div>
-                </div>
-              </div>
+                  </>
+                }
+              />
             )}
           </li>
         )
@@ -498,6 +473,30 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
                 value={replyValue}
                 onChange={setReplyValue}
                 onSubmit={() => addInlineReply(n, replyValue)}
+                onSubmitWithExtra={async (extra) => {
+                  const canAdd = replyValue.text.trim().length > 0
+                  if (!canAdd) return
+                  const now = new Date().toISOString()
+                  const noteId = await db.notes.add({
+                    spaceId,
+                    title: null,
+                    text: replyValue.text.trim(),
+                    tags: replyValue.tags,
+                    createdAt: now,
+                    modifiedAt: now,
+                    date: now,
+                    parentId: n.id!,
+                    deletedAt: null,
+                    isDirty: 1,
+                    serverId: null,
+                    clientId: crypto.randomUUID(),
+                  } as NoteRecord)
+                  const files = (extra?.attachments ?? []).slice(0, 10)
+                  for (const f of files) { try { await addLocalAttachment(noteId, f) } catch {} }
+                  window.dispatchEvent(new Event('focuz:local-write'))
+                  setReplyingForId(null)
+                  setReplyValue({ text: '', tags: [] })
+                }}
                 onCancel={() => setReplyingForId(null)}
                 mode="reply"
                 autoCollapse={false}
@@ -628,12 +627,13 @@ function App() {
     }
     window.addEventListener('popstate', onPop)
 
-    const { kick } = scheduleAutoSync()
+    const { kick, cleanup } = scheduleAutoSync()
     const onLocalWrite = () => kick()
     window.addEventListener('focuz:local-write', onLocalWrite)
     return () => {
       window.removeEventListener('focuz:local-write', onLocalWrite)
       window.removeEventListener('popstate', onPop)
+      try { cleanup() } catch {}
     }
   }, [authed])
 
@@ -723,7 +723,7 @@ function App() {
 
   return (
     <div className="container space-y-4">
-      <TopBar onOpenSpaces={() => setDrawerOpen(true)} onOpenSettings={() => setSettingsOpen(true)} onLogout={() => { logout(); setAuthed(false) }} isThread={!!currentNoteId} onBack={goBack} />
+      <TopBar onOpenSpaces={() => setDrawerOpen(true)} onOpenSettings={() => setSettingsOpen(true)} onLogout={() => { setAuthed(false); purgeAndLogout().catch(() => { teardownSync(); logout() }) }} isThread={!!currentNoteId} onBack={goBack} />
       <div className="flex gap-4">
         {left}
         {center}
@@ -750,47 +750,8 @@ function App() {
 
 // Thread view components
 function SingleNoteCard({ note, onEdit, onDelete, onOpenThread }: { note: NoteRecord; onEdit: () => void; onDelete: () => void; onOpenThread: (nid: number) => void }) {
-  const [menuOpen, setMenuOpen] = useState(false)
-  const parentNote = useLiveQuery(() => note.parentId ? db.notes.get(note.parentId) : Promise.resolve(undefined), [note.parentId]) as NoteRecord | undefined
   return (
-    <div className="card-nopad">
-      <div className="h-[30px] relative">
-        <div className="absolute right-4 top-0 h-[30px] flex items-center">
-          <button className="px-1 text-neutral-400 hover:text-neutral-100 h-[30px]" onClick={() => setMenuOpen(s => !s)} aria-label="Open menu">⋯</button>
-          {menuOpen && (
-            <div className="absolute right-0 mt-1 z-10 rounded border border-neutral-800 bg-neutral-900 shadow-lg">
-              <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpen(false); onEdit() }}>Edit</button>
-              <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpen(false); onDelete() }}>Delete</button>
-            </div>
-          )}
-        </div>
-      </div>
-      <div className="px-4 min-w-0">
-        {note.parentId != null && parentNote && !parentNote.deletedAt && (
-          <div className="mb-2 min-w-0 max-w-full">
-            <button
-              className="block w-full max-w-full min-w-0 box-border rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-secondary hover:bg-neutral-800 select-none overflow-hidden text-left"
-              type="button"
-              onClick={() => onOpenThread(parentNote.id!)}
-              title={parentNote.text}
-            >
-              <span className="block overflow-hidden text-ellipsis whitespace-nowrap">{parentNote.text}</span>
-            </button>
-          </div>
-        )}
-        <HighlightedText className="block whitespace-pre-wrap leading-6 text-primary" text={note.text} query={''} />
-        {note.tags?.length ? (
-          <div className="mt-2 text-secondary">{note.tags.join(', ')}</div>
-        ) : null}
-      </div>
-      <div className="px-4 py-2 text-secondary flex items-center justify-between">
-        <div className="flex items-center gap-2" title={formatExactDateTime(note.createdAt)}>
-          <span>{note.isDirty ? '✔' : '✔✔'}</span>
-          <span>{formatRelativeShort(note.createdAt)}</span>
-        </div>
-        <div />
-      </div>
-    </div>
+    <NoteCard note={note} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread} showParentPreview />
   )
 }
 
@@ -818,8 +779,32 @@ function ReplyComposer({ spaceId, parentId }: { spaceId: number; parentId: numbe
     window.dispatchEvent(new Event('focuz:local-write'))
     setValue({ text: '', tags: [] })
   }
+  async function addReplyWithAttachments(extra: { attachments?: File[] }) {
+    if (!canAdd) return
+    const now = new Date().toISOString()
+    const noteId = await db.notes.add({
+      spaceId,
+      title: null,
+      text: value.text.trim(),
+      tags: value.tags,
+      createdAt: now,
+      modifiedAt: now,
+      date: now,
+      parentId,
+      deletedAt: null,
+      isDirty: 1,
+      serverId: null,
+      clientId: crypto.randomUUID(),
+    } as NoteRecord)
+    const files = (extra.attachments ?? []).slice(0, 10)
+    for (const f of files) {
+      try { await addLocalAttachment(noteId, f) } catch {}
+    }
+    window.dispatchEvent(new Event('focuz:local-write'))
+    setValue({ text: '', tags: [] })
+  }
   return (
-    <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onCancel={() => setValue({ text: '', tags: [] })} mode="reply" defaultExpanded={false} spaceId={spaceId} />
+    <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onSubmitWithExtra={addReplyWithAttachments} onCancel={() => setValue({ text: '', tags: [] })} mode="reply" defaultExpanded={false} spaceId={spaceId} />
   )
 }
 
@@ -859,7 +844,7 @@ function NoteThread({ spaceId, noteId, onBack, onOpenThread }: { spaceId: number
   return (
     <div className="flex-1 min-w-0 space-y-[15px]">
       {editing ? (
-        <NoteEditor value={editValue} onChange={setEditValue} onSubmit={saveEdit} onCancel={() => setEditing(false)} mode="edit" autoCollapse={false} spaceId={spaceId} />
+        <NoteEditor value={editValue} onChange={setEditValue} onSubmit={saveEdit} onCancel={() => setEditing(false)} mode="edit" autoCollapse={false} spaceId={spaceId} noteId={noteId} />
       ) : (
         <SingleNoteCard note={mainNote} onEdit={() => setEditing(true)} onDelete={removeMain} onOpenThread={onOpenThread} />
       )}
