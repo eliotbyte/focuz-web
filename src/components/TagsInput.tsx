@@ -3,6 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '../lib/db'
 
 export default function TagsInput({ value, onChange, placeholder, className, spaceId, invertible = false }: { value: string[]; onChange: (tags: string[]) => void; placeholder?: string; className?: string; spaceId?: number; invertible?: boolean }) {
+  const MAX_LEN = 20
   const [draft, setDraft] = useState<string>('')
   const [queryKey, setQueryKey] = useState<string>('')
   const [focused, setFocused] = useState<boolean>(false)
@@ -18,10 +19,81 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
     return tagText.startsWith('!') ? tagText.slice(1) : tagText
   }
 
+  // Sanitize draft input while typing
+  function sanitizeDraftInput(raw: string): string {
+    const allowedLetterOrDigit = /[A-Za-zА-Яа-яЁё0-9]/
+    let out = ''
+    let prev: string | null = null
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw[i]
+      if (invertible && i === 0 && ch === '!') {
+        // allow leading '!'
+        if (out.startsWith('!')) continue
+        out += '!'
+        prev = '!'
+        continue
+      }
+      if (allowedLetterOrDigit.test(ch)) {
+        const base = invertible && out.startsWith('!') ? out.slice(1) : out
+        if (base.length >= MAX_LEN) continue
+        out += ch
+        prev = ch
+        continue
+      }
+      if ((ch === '-' || ch === '_')) {
+        // cannot be first (ignores if no leading alnum yet)
+        const base = invertible && out.startsWith('!') ? out.slice(1) : out
+        if (base.length === 0) continue
+        // prevent any two special chars in a row ("-", "_" in any order)
+        if (prev === '-' || prev === '_') continue
+        if (base.length >= MAX_LEN) continue
+        out += ch
+        prev = ch
+        continue
+      }
+      // ignore all other characters
+    }
+    return out
+  }
+
+  // Normalize a completed tag base to meet constraints, return '' if invalid
+  function normalizeFinalBase(rawBase: string): string {
+    if (!rawBase) return ''
+    // remove leading non-alnum
+    let s = rawBase.replace(/^[^A-Za-zА-Яа-яЁё0-9]+/, '')
+    if (!s) return ''
+    // reject any adjacent special chars (including mixed -_ or _-)
+    if (/[-_]{2,}/.test(s)) return ''
+    // enforce max length
+    if (s.length > MAX_LEN) return ''
+    // trim trailing non-alnum
+    s = s.replace(/[^A-Za-zА-Яа-яЁё0-9]+$/, '')
+    // ensure starts and ends with alnum
+    if (!/^[A-Za-zА-Яа-яЁё0-9].*[A-Za-zА-Яа-яЁё0-9]$/.test(s)) {
+      if (/^[A-Za-zА-Яа-яЁё0-9]$/.test(s)) return s
+      return ''
+    }
+    return s
+  }
+
+  function draftFromSuggestion(name: string, keepBang: boolean, currentDraft: string): string {
+    let base = name || ''
+    if (base.length > MAX_LEN) base = base.slice(0, MAX_LEN)
+    base = base.replace(/[^A-Za-zА-Яа-яЁё0-9]+$/, '')
+    const bang = invertible && keepBang && currentDraft.trim().startsWith('!') ? '!' : ''
+    return bang + base
+  }
+
   function pushTag(tagText: string) {
-    const token = tagText.trim()
+    let token = tagText.trim()
     if (!token) return
-    const next = Array.from(new Set([...value, token]))
+    // Handle invertible '!' prefix and validate base
+    const hasBang = invertible && token.startsWith('!')
+    const baseRaw = hasBang ? token.slice(1) : token
+    const base = normalizeFinalBase(baseRaw)
+    if (!base) return
+    const final = hasBang ? ('!' + base) : base
+    const next = Array.from(new Set([...value, final]))
     onChange(next)
     setDraft('')
     setQueryKey('')
@@ -29,7 +101,7 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === ' ' || e.key === ';') {
+    if (e.key === ' ' || e.key === ';' || e.key === ',' || e.key === '.') {
       e.preventDefault()
       pushTag(draft)
       return
@@ -40,8 +112,8 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
       e.preventDefault()
       const nextIdx = selectedIdx < 0 ? 0 : Math.min(selectedIdx + 1, list.length - 1)
       setSelectedIdx(nextIdx)
-      if (invertible && draft.trim().startsWith('!')) setDraft('!' + list[nextIdx])
-      else setDraft(list[nextIdx])
+      if (invertible) setDraft(draftFromSuggestion(list[nextIdx], true, draft))
+      else setDraft(draftFromSuggestion(list[nextIdx], false, draft))
       return
     }
     if (e.key === 'ArrowUp') {
@@ -50,8 +122,8 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
       e.preventDefault()
       const nextIdx = selectedIdx <= 0 ? 0 : selectedIdx - 1
       setSelectedIdx(nextIdx)
-      if (invertible && draft.trim().startsWith('!')) setDraft('!' + list[nextIdx])
-      else setDraft(list[nextIdx])
+      if (invertible) setDraft(draftFromSuggestion(list[nextIdx], true, draft))
+      else setDraft(draftFromSuggestion(list[nextIdx], false, draft))
       return
     }
     if (e.key === 'Enter') {
@@ -176,7 +248,13 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
           className="bg-transparent outline-none flex-1 min-w-24 text-primary"
           value={draft}
           placeholder={value.length === 0 ? (placeholder || 'Add tags') : ''}
-          onChange={e => { setDraft(e.target.value); setQueryKey(e.target.value); setSelectedIdx(-1) }}
+          onChange={e => {
+            const sanitized = sanitizeDraftInput(e.target.value)
+            setDraft(sanitized)
+            const qRaw = invertible && sanitized.startsWith('!') ? sanitized.slice(1) : sanitized
+            setQueryKey(qRaw)
+            setSelectedIdx(-1)
+          }}
           onKeyDown={handleKeyDown}
           onFocus={() => setFocused(true)}
           onBlur={handleBlur}
