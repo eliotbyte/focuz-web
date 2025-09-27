@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '../lib/db'
 
-export default function TagsInput({ value, onChange, placeholder, className, spaceId }: { value: string[]; onChange: (tags: string[]) => void; placeholder?: string; className?: string; spaceId?: number }) {
+export default function TagsInput({ value, onChange, placeholder, className, spaceId, invertible = false }: { value: string[]; onChange: (tags: string[]) => void; placeholder?: string; className?: string; spaceId?: number; invertible?: boolean }) {
   const [draft, setDraft] = useState<string>('')
   const [queryKey, setQueryKey] = useState<string>('')
   const [focused, setFocused] = useState<boolean>(false)
@@ -13,6 +13,10 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
     // Keep draft trimmed of delimiter-only strings
     if (draft.trim() === '' && draft.length > 0) setDraft('')
   }, [draft])
+
+  function normalizeBase(tagText: string): string {
+    return tagText.startsWith('!') ? tagText.slice(1) : tagText
+  }
 
   function pushTag(tagText: string) {
     const token = tagText.trim()
@@ -36,7 +40,8 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
       e.preventDefault()
       const nextIdx = selectedIdx < 0 ? 0 : Math.min(selectedIdx + 1, list.length - 1)
       setSelectedIdx(nextIdx)
-      setDraft(list[nextIdx])
+      if (invertible && draft.trim().startsWith('!')) setDraft('!' + list[nextIdx])
+      else setDraft(list[nextIdx])
       return
     }
     if (e.key === 'ArrowUp') {
@@ -45,13 +50,16 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
       e.preventDefault()
       const nextIdx = selectedIdx <= 0 ? 0 : selectedIdx - 1
       setSelectedIdx(nextIdx)
-      setDraft(list[nextIdx])
+      if (invertible && draft.trim().startsWith('!')) setDraft('!' + list[nextIdx])
+      else setDraft(list[nextIdx])
       return
     }
     if (e.key === 'Enter') {
       if (selectedIdx >= 0 && selectedIdx < suggestions.length) {
         e.preventDefault()
-        pushTag(suggestions[selectedIdx])
+        const chosen = suggestions[selectedIdx]
+        const final = invertible && draft.trim().startsWith('!') ? ('!' + chosen) : chosen
+        pushTag(final)
         return
       }
     }
@@ -71,14 +79,17 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
     if (draft.trim()) pushTag(draft)
   }
 
-  function clickTagToEdit(idx: number) {
-    const tag = value[idx]
-    const current = draft.trim()
-    let next = value.filter((_, i) => i !== idx)
-    if (current) next = Array.from(new Set([...next, current]))
+  function removeTag(idx: number) {
+    const next = value.filter((_, i) => i !== idx)
     onChange(next)
-    setDraft(tag)
-    inputRef.current?.focus()
+  }
+
+  function toggleInvertTag(idx: number) {
+    const tag = value[idx]
+    const toggled = tag.startsWith('!') ? tag.slice(1) : ('!' + normalizeBase(tag))
+    const next = value.slice()
+    next[idx] = toggled
+    onChange(next)
   }
 
   const containerClasses = useMemo(() => {
@@ -89,8 +100,13 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
   // Build last-used map from recent notes and compute suggestions from tags directory
   const suggestions = useLiveQuery(async () => {
     if (!spaceId) return [] as string[]
-    const selected = new Set(value.map(v => v.toLowerCase()))
-    const q = queryKey.trim().toLowerCase()
+    // Exclude already selected tags (ignore invert flag when invertible)
+    const selected = new Set(
+      value.map(v => (invertible ? normalizeBase(v) : v).toLowerCase())
+    )
+    const rawQ = queryKey.trim()
+    const baseQ = invertible && rawQ.startsWith('!') ? rawQ.slice(1) : rawQ
+    const q = baseQ.toLowerCase()
 
     // Build last used map from recent notes for ordering
     const lastUsed = new Map<string, string>() // tagLower -> ISO modifiedAt
@@ -132,10 +148,28 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
     <div className="w-full relative">
       <div className={containerClasses} onClick={() => inputRef.current?.focus()}>
         {value.map((tag, idx) => (
-          <button key={`${tag}-${idx}`} type="button" className="inline-flex items-center gap-1 rounded-full bg-neutral-800 px-2 py-1 text-xs text-secondary hover:bg-neutral-700" onClick={() => clickTagToEdit(idx)}>
-            <span>{tag}</span>
-            <span className="text-neutral-400 hover:text-neutral-200">×</span>
-          </button>
+          <span key={`${tag}-${idx}`} className="inline-flex items-center gap-1 rounded-full bg-neutral-800 px-2 py-1 text-xs text-secondary">
+            {invertible ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1"
+                onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleInvertTag(idx) }}
+                title={tag.startsWith('!') ? 'Include tag' : 'Exclude tag'}
+                aria-label={tag.startsWith('!') ? 'Include tag' : 'Exclude tag'}
+              >
+                <span>{tag.startsWith('!') ? tag : tag}</span>
+              </button>
+            ) : (
+              <span>{tag}</span>
+            )}
+            <button
+              type="button"
+              className="text-neutral-400 hover:text-neutral-200"
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); removeTag(idx) }}
+              aria-label="Remove tag"
+              title="Remove"
+            >×</button>
+          </span>
         ))}
         <input
           ref={inputRef}
@@ -156,7 +190,7 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
               type="button"
               className={`block w-full text-left px-3 py-2 text-sm ${i === selectedIdx ? 'bg-neutral-800 text-neutral-100' : 'text-secondary hover:bg-neutral-800'}`}
               onMouseDown={e => e.preventDefault()}
-              onClick={() => pushTag(s)}
+              onClick={() => { const final = invertible && draft.trim().startsWith('!') ? ('!' + s) : s; pushTag(final) }}
             >
               {s}
             </button>

@@ -8,6 +8,7 @@ import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
 import Toasts from './components/Toasts'
 import NoteEditor, { type NoteEditorValue } from './components/NoteEditor'
 import NoteCard from './components/NoteCard'
+import TagsInput from './components/TagsInput'
 
 function TopBar({ onOpenSpaces, onOpenSettings, onLogout, isThread, onBack }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void; isThread?: boolean; onBack?: () => void }) {
   return (
@@ -182,36 +183,55 @@ function QuickFiltersPanel({
   value,
   onChange,
   hideNoParents = false,
+  spaceId,
 }: {
-  value: { text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }
-  onChange: (v: { text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }) => void
+  value: { text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }
+  onChange: (v: { text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }) => void
   hideNoParents?: boolean
+  spaceId?: number | null
 }) {
   const [text, setText] = useState(value.text)
+  const [tags, setTags] = useState<string[]>(Array.isArray((value as any).tags) ? (value as any).tags : [])
   const [noParents, setNoParents] = useState(value.noParents)
   const [sortField, setSortField] = useState<SortField>(value.sort.split(',')[0] as SortField)
   const [sortDir, setSortDir] = useState<'ASC' | 'DESC'>(value.sort.split(',')[1] as 'ASC' | 'DESC')
 
-  useEffect(() => { setText(value.text); setNoParents(value.noParents); setSortField(value.sort.split(',')[0] as SortField); setSortDir(value.sort.split(',')[1] as 'ASC' | 'DESC') }, [value])
+  useEffect(() => {
+    setText(value.text)
+    setTags(Array.isArray((value as any).tags) ? (value as any).tags : [])
+    setNoParents(value.noParents)
+    setSortField(value.sort.split(',')[0] as SortField)
+    setSortDir(value.sort.split(',')[1] as 'ASC' | 'DESC')
+  }, [value])
 
   return (
     <aside className="hidden lg:block w-64 shrink-0">
       <div className="card space-y-3">
         <div className="mb-1 font-medium">Quick filters</div>
-        <input className="input" placeholder="Search" value={text} onChange={e => { const v = e.target.value; setText(v); onChange({ text: v, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }} />
+        <input className="input" placeholder="Search" value={text} onChange={e => { const v = e.target.value; setText(v); onChange({ text: v, tags, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }} />
+        <div>
+          <TagsInput
+            value={tags}
+            onChange={(next) => { setTags(next); onChange({ text, tags: next, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}
+            placeholder="Tags"
+            className="mt-1"
+            spaceId={spaceId ?? undefined}
+            invertible
+          />
+        </div>
         {!hideNoParents && (
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={noParents} onChange={e => { setNoParents(e.target.checked); onChange({ text, noParents: e.target.checked, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }} />
+            <input type="checkbox" checked={noParents} onChange={e => { setNoParents(e.target.checked); onChange({ text, tags, noParents: e.target.checked, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }} />
             No parents
           </label>
         )}
         <div className="grid grid-cols-2 gap-2">
-          <select className="input" value={sortField} onChange={e => { const f = e.target.value as SortField; setSortField(f); onChange({ text, noParents, sort: `${f},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
+          <select className="input" value={sortField} onChange={e => { const f = e.target.value as SortField; setSortField(f); onChange({ text, tags, noParents, sort: `${f},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
             <option value="modifiedat">modified_at</option>
             <option value="createdat">created_at</option>
             <option value="date">date</option>
           </select>
-          <select className="input" value={sortDir} onChange={e => { const d = e.target.value as 'ASC' | 'DESC'; setSortDir(d); onChange({ text, noParents, sort: `${sortField},${d}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
+          <select className="input" value={sortDir} onChange={e => { const d = e.target.value as 'ASC' | 'DESC'; setSortDir(d); onChange({ text, tags, noParents, sort: `${sortField},${d}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
             <option value="DESC">desc</option>
             <option value="ASC">asc</option>
           </select>
@@ -281,7 +301,7 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
   )
 }
 
-function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId: number; filter: FilterRecord | null; quick: { text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }; parentId?: number | null; onOpenThread?: (noteId: number) => void }) {
+function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId: number; filter: FilterRecord | null; quick: { text: string; tags?: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }; parentId?: number | null; onOpenThread?: (noteId: number) => void }) {
   const [idsBySearch, setIdsBySearch] = useState<number[] | null>(null)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editingValue, setEditingValue] = useState<{ text: string; tags: string[] }>({ text: '', tags: [] })
@@ -337,6 +357,17 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
     }
     if (filter?.params?.includeTags?.length) {
       result = result.filter(n => filter!.params!.includeTags!.every(t => n.tags.includes(t)))
+    }
+    const quickTags = (quick as any).tags as string[] | undefined
+    if (quickTags && quickTags.length > 0) {
+      const includeTags = quickTags.filter(t => !t.startsWith('!'))
+      const excludeTags = quickTags.filter(t => t.startsWith('!')).map(t => t.slice(1))
+      if (includeTags.length > 0) {
+        result = result.filter(n => (n.tags || []).length > 0 && includeTags.every(t => n.tags.includes(t)))
+      }
+      if (excludeTags.length > 0) {
+        result = result.filter(n => !excludeTags.some(t => (n.tags || []).includes(t)))
+      }
     }
     if (filter?.params?.excludeTags?.length) {
       result = result.filter(n => !filter!.params!.excludeTags!.some(t => n.tags.includes(t)))
@@ -569,8 +600,8 @@ function App() {
   // In-memory back trail within tab. Oldest -> newest. Excludes current page. null represents feed (space root)
   const historyTrailRef = useRef<Array<number | null>>([])
 
-  const [quickFeed, setQuickFeed] = useState<{ text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }>({ text: '', noParents: false, sort: 'modifiedat,DESC' })
-  const [quickThread, setQuickThread] = useState<{ text: string; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }>({ text: '', noParents: false, sort: 'modifiedat,DESC' })
+  const [quickFeed, setQuickFeed] = useState<{ text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }>({ text: '', tags: [], noParents: false, sort: 'modifiedat,DESC' })
+  const [quickThread, setQuickThread] = useState<{ text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }>({ text: '', tags: [], noParents: false, sort: 'modifiedat,DESC' })
 
   useEffect(() => {
     const off = onAuthRequired(setNeedReauth)
@@ -608,10 +639,10 @@ function App() {
       // load persisted quick filters
       if (note) {
         const saved = await getKV<typeof quickThread>(`quick:space:${id}:note:${note}`)
-        if (saved) setQuickThread(saved)
+        if (saved) setQuickThread((saved as any).tags ? saved : { ...(saved as any), tags: [] })
       } else {
         const saved = await getKV<typeof quickFeed>(`quick:space:${id}`)
-        if (saved) setQuickFeed(saved)
+        if (saved) setQuickFeed((saved as any).tags ? saved : { ...(saved as any), tags: [] })
       }
       await ensureNoteIndexForSpace(id)
       await runSync()
@@ -655,7 +686,7 @@ function App() {
     void (async () => {
       const key = `quick:space:${currentSpaceId}:note:${noteId}`
       const saved = await getKV<typeof quickThread>(key)
-      if (saved) setQuickThread(saved)
+      if (saved) setQuickThread((saved as any).tags ? saved : { ...(saved as any), tags: [] })
     })()
   }
   function openSpace(spaceId: number) {
@@ -667,7 +698,7 @@ function App() {
     void (async () => {
       const key = `quick:space:${spaceId}`
       const saved = await getKV<typeof quickFeed>(key)
-      if (saved) setQuickFeed(saved)
+      if (saved) setQuickFeed((saved as any).tags ? saved : { ...(saved as any), tags: [] })
     })()
   }
 
@@ -694,10 +725,10 @@ function App() {
     void (async () => {
       if (target == null) {
         const saved = await getKV<typeof quickFeed>(`quick:space:${currentSpaceId}`)
-        if (saved) setQuickFeed(saved)
+        if (saved) setQuickFeed((saved as any).tags ? saved : { ...(saved as any), tags: [] })
       } else {
         const saved = await getKV<typeof quickThread>(`quick:space:${currentSpaceId}:note:${target}`)
-        if (saved) setQuickThread(saved)
+        if (saved) setQuickThread((saved as any).tags ? saved : { ...(saved as any), tags: [] })
       }
     })()
   }
@@ -732,10 +763,12 @@ function App() {
               value={quickThread}
               onChange={(v) => { setQuickThread(v); if (currentSpaceId && currentNoteId) setKV(`quick:space:${currentSpaceId}:note:${currentNoteId}`, v) }}
               hideNoParents
+              spaceId={currentSpaceId}
             />
           : <QuickFiltersPanel
               value={quickFeed}
               onChange={(v) => { setQuickFeed(v); if (currentSpaceId) setKV(`quick:space:${currentSpaceId}` , v) }}
+              spaceId={currentSpaceId}
             />
         }
       </div>
