@@ -241,18 +241,19 @@ function QuickFiltersPanel({
   )
 }
 
-function NoteComposer({ spaceId }: { spaceId: number }) {
+function NoteComposer({ spaceId, positiveQuickTags = [] }: { spaceId: number; positiveQuickTags?: string[] }) {
   const [value, setValue] = useState<NoteEditorValue>({ text: '', tags: [] })
   const canAdd = useMemo(() => value.text.trim().length > 0, [value.text])
 
   async function addNote() {
     if (!canAdd) return
     const now = new Date().toISOString()
+    const mergedTags = Array.from(new Set([...(value.tags || []), ...positiveQuickTags]))
     const payload: NoteRecord = {
       spaceId,
       title: null,
       text: value.text.trim(),
-      tags: value.tags,
+      tags: mergedTags,
       createdAt: now,
       modifiedAt: now,
       date: now,
@@ -270,11 +271,12 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
   async function addNoteWithAttachments(extra: { attachments?: File[] }) {
     if (!canAdd) return
     const now = new Date().toISOString()
+    const mergedTags = Array.from(new Set([...(value.tags || []), ...positiveQuickTags]))
     const noteId = await db.notes.add({
       spaceId,
       title: null,
       text: value.text.trim(),
-      tags: value.tags,
+      tags: mergedTags,
       createdAt: now,
       modifiedAt: now,
       date: now,
@@ -301,7 +303,7 @@ function NoteComposer({ spaceId }: { spaceId: number }) {
   )
 }
 
-function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId: number; filter: FilterRecord | null; quick: { text: string; tags?: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }; parentId?: number | null; onOpenThread?: (noteId: number) => void }) {
+function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTag }: { spaceId: number; filter: FilterRecord | null; quick: { text: string; tags?: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }; parentId?: number | null; onOpenThread?: (noteId: number) => void; onAddQuickTag?: (tag: string) => void }) {
   const [idsBySearch, setIdsBySearch] = useState<number[] | null>(null)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editingValue, setEditingValue] = useState<{ text: string; tags: string[] }>({ text: '', tags: [] })
@@ -433,11 +435,13 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
     const canAdd = value.text.trim().length > 0
     if (!canAdd) return
     const now = new Date().toISOString()
+    const positiveQuickTags = ((quick as any).tags || []).filter((t: string) => !t.startsWith('!')) as string[]
+    const mergedTags = Array.from(new Set([...(value.tags || []), ...positiveQuickTags]))
     const payload: NoteRecord = {
       spaceId,
       title: null,
       text: value.text.trim(),
-      tags: value.tags,
+      tags: mergedTags,
       createdAt: now,
       modifiedAt: now,
       date: now,
@@ -457,6 +461,8 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
     <ul className="space-y-4">
       {notes.flatMap((n: NoteRecord) => {
         const items: ReactNode[] = []
+        const positiveQuickTags = ((quick as any).tags || []).filter((t: string) => !t.startsWith('!')) as string[]
+        const hiddenTagsSet = new Set(positiveQuickTags)
         // Note item (either editor replacing the note, or the note card)
         items.push(
           <li key={n.id}>
@@ -480,6 +486,8 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
                 onDelete={() => { removeNote(n.id!) }}
                 onOpenThread={onOpenThread}
                 showParentPreview={parentId == null && (n.parentId ?? null) != null}
+                hiddenTags={hiddenTagsSet}
+                onTagClick={(tag) => { if (onAddQuickTag) onAddQuickTag(tag) }}
                 childrenRight={
                   <>
                     {(repliesById.get(n.id!) || 0) > 0 && (
@@ -508,11 +516,13 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread }: { spaceId:
                   const canAdd = replyValue.text.trim().length > 0
                   if (!canAdd) return
                   const now = new Date().toISOString()
+                  const positiveQuickTags = ((quick as any).tags || []).filter((t: string) => !t.startsWith('!')) as string[]
+                  const mergedTags = Array.from(new Set([...(replyValue.tags || []), ...positiveQuickTags]))
                   const noteId = await db.notes.add({
                     spaceId,
                     title: null,
                     text: replyValue.text.trim(),
-                    tags: replyValue.tags,
+                    tags: mergedTags,
                     createdAt: now,
                     modifiedAt: now,
                     date: now,
@@ -740,13 +750,39 @@ function App() {
   if (currentSpaceId) {
     if (currentNoteId) {
       center = (
-        <NoteThread spaceId={currentSpaceId} noteId={currentNoteId} onBack={goBack} onOpenThread={openThread} quick={quickThread} />
+        <NoteThread
+          spaceId={currentSpaceId}
+          noteId={currentNoteId}
+          onBack={goBack}
+          onOpenThread={openThread}
+          quick={quickThread}
+          onAddQuickTag={(tag) => {
+            const tags = quickThread.tags || []
+            if (tags.includes(tag)) return
+            const next = { ...quickThread, tags: [...tags, tag] }
+            setQuickThread(next)
+            if (currentSpaceId && currentNoteId) setKV(`quick:space:${currentSpaceId}:note:${currentNoteId}`, next)
+          }}
+        />
       )
     } else {
       center = (
         <div className="flex-1 min-w-0 space-y-[15px]">
-          <NoteComposer spaceId={currentSpaceId} />
-          <NoteList spaceId={currentSpaceId} filter={selectedFilter} quick={quickFeed} onOpenThread={openThread} />
+          <NoteComposer spaceId={currentSpaceId} positiveQuickTags={(quickFeed.tags || []).filter(t => !t.startsWith('!'))} />
+          <NoteList
+            spaceId={currentSpaceId}
+            filter={selectedFilter}
+            quick={quickFeed}
+            onOpenThread={openThread}
+            onAddQuickTag={(tag) => {
+              if (!currentSpaceId) return
+              const tags = quickFeed.tags || []
+              if (tags.includes(tag)) return
+              const next = { ...quickFeed, tags: [...tags, tag] }
+              setQuickFeed(next)
+              setKV(`quick:space:${currentSpaceId}`, next)
+            }}
+          />
         </div>
       )
     }
@@ -788,17 +824,18 @@ function SingleNoteCard({ note, onEdit, onDelete, onOpenThread }: { note: NoteRe
   )
 }
 
-function ReplyComposer({ spaceId, parentId }: { spaceId: number; parentId: number }) {
+function ReplyComposer({ spaceId, parentId, positiveQuickTags = [] }: { spaceId: number; parentId: number; positiveQuickTags?: string[] }) {
   const [value, setValue] = useState<NoteEditorValue>({ text: '', tags: [] })
   const canAdd = useMemo(() => value.text.trim().length > 0, [value.text])
   async function addNote() {
     if (!canAdd) return
     const now = new Date().toISOString()
+    const mergedTags = Array.from(new Set([...(value.tags || []), ...positiveQuickTags]))
     const payload: NoteRecord = {
       spaceId,
       title: null,
       text: value.text.trim(),
-      tags: value.tags,
+      tags: mergedTags,
       createdAt: now,
       modifiedAt: now,
       date: now,
@@ -815,11 +852,12 @@ function ReplyComposer({ spaceId, parentId }: { spaceId: number; parentId: numbe
   async function addReplyWithAttachments(extra: { attachments?: File[] }) {
     if (!canAdd) return
     const now = new Date().toISOString()
+    const mergedTags = Array.from(new Set([...(value.tags || []), ...positiveQuickTags]))
     const noteId = await db.notes.add({
       spaceId,
       title: null,
       text: value.text.trim(),
-      tags: value.tags,
+      tags: mergedTags,
       createdAt: now,
       modifiedAt: now,
       date: now,
@@ -841,7 +879,7 @@ function ReplyComposer({ spaceId, parentId }: { spaceId: number; parentId: numbe
   )
 }
 
-function NoteThread({ spaceId, noteId, onBack, onOpenThread, quick }: { spaceId: number; noteId: number; onBack: () => void; onOpenThread: (nid: number) => void; quick: { text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` } }) {
+function NoteThread({ spaceId, noteId, onBack, onOpenThread, quick, onAddQuickTag }: { spaceId: number; noteId: number; onBack: () => void; onOpenThread: (nid: number) => void; quick: { text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }; onAddQuickTag?: (tag: string) => void }) {
   const mainNote = useLiveQuery(() => db.notes.get(noteId), [noteId]) as NoteRecord | undefined
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState<NoteEditorValue>({ text: '', tags: [] })
@@ -881,9 +919,9 @@ function NoteThread({ spaceId, noteId, onBack, onOpenThread, quick }: { spaceId:
       ) : (
         <SingleNoteCard note={mainNote} onEdit={() => setEditing(true)} onDelete={removeMain} onOpenThread={onOpenThread} />
       )}
-      <ReplyComposer spaceId={spaceId} parentId={noteId} />
+      <ReplyComposer spaceId={spaceId} parentId={noteId} positiveQuickTags={quick.tags.filter(t => !t.startsWith('!'))} />
       <div className="min-w-0">
-        <NoteList spaceId={spaceId} filter={null} quick={quick} parentId={noteId} onOpenThread={onOpenThread} />
+        <NoteList spaceId={spaceId} filter={null} quick={quick} parentId={noteId} onOpenThread={onOpenThread} onAddQuickTag={onAddQuickTag} />
       </div>
     </div>
   )

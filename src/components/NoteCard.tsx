@@ -13,6 +13,8 @@ export default function NoteCard({
   onOpenThread,
   childrenRight,
   showParentPreview = false,
+  onTagClick,
+  hiddenTags,
 }: {
   note: NoteRecord
   onEdit?: () => void
@@ -20,6 +22,8 @@ export default function NoteCard({
   onOpenThread?: (nid: number) => void
   childrenRight?: React.ReactNode
   showParentPreview?: boolean
+  onTagClick?: (tag: string) => void
+  hiddenTags?: Set<string>
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const parentNote = useLiveQuery(() => showParentPreview && note.parentId ? db.notes.get(note.parentId) : Promise.resolve(undefined), [showParentPreview, note.parentId]) as NoteRecord | undefined
@@ -55,7 +59,19 @@ export default function NoteCard({
         <HighlightedText className="block whitespace-pre-wrap leading-6 text-primary" text={note.text} query={''} />
         <NoteImages noteId={note.id!} />
         {note.tags?.length ? (
-          <div className="mt-2 text-secondary">{note.tags.join(', ')}</div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {note.tags.filter(t => !(hiddenTags?.has(t))).map((t, i) => (
+              <button
+                key={`${t}-${i}`}
+                type="button"
+                className="inline-flex items-center rounded-full bg-neutral-800 px-2 py-1 text-xs text-secondary hover:bg-neutral-700 select-none"
+                onClick={() => onTagClick && onTagClick(t)}
+                title={t}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
         ) : null}
       </div>
       <div className="px-4 py-2 text-secondary flex items-center justify-between">
