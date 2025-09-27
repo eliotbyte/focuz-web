@@ -740,7 +740,7 @@ function App() {
   if (currentSpaceId) {
     if (currentNoteId) {
       center = (
-        <NoteThread spaceId={currentSpaceId} noteId={currentNoteId} onBack={goBack} onOpenThread={openThread} />
+        <NoteThread spaceId={currentSpaceId} noteId={currentNoteId} onBack={goBack} onOpenThread={openThread} quick={quickThread} />
       )
     } else {
       center = (
@@ -841,7 +841,7 @@ function ReplyComposer({ spaceId, parentId }: { spaceId: number; parentId: numbe
   )
 }
 
-function NoteThread({ spaceId, noteId, onBack, onOpenThread }: { spaceId: number; noteId: number; onBack: () => void; onOpenThread: (nid: number) => void }) {
+function NoteThread({ spaceId, noteId, onBack, onOpenThread, quick }: { spaceId: number; noteId: number; onBack: () => void; onOpenThread: (nid: number) => void; quick: { text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` } }) {
   const mainNote = useLiveQuery(() => db.notes.get(noteId), [noteId]) as NoteRecord | undefined
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState<NoteEditorValue>({ text: '', tags: [] })
@@ -883,7 +883,7 @@ function NoteThread({ spaceId, noteId, onBack, onOpenThread }: { spaceId: number
       )}
       <ReplyComposer spaceId={spaceId} parentId={noteId} />
       <div className="min-w-0">
-        <NoteList spaceId={spaceId} filter={null} quick={{ text: '', noParents: false, sort: 'modifiedat,DESC' }} parentId={noteId} onOpenThread={onOpenThread} />
+        <NoteList spaceId={spaceId} filter={null} quick={quick} parentId={noteId} onOpenThread={onOpenThread} />
       </div>
     </div>
   )
