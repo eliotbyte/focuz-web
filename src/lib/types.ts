@@ -83,6 +83,7 @@ export interface FilterParams {
 export interface FilterRecord {
   id?: number
   serverId?: number | null
+  clientId?: string | null
   spaceId: number
   parentId?: number | null
   name: string

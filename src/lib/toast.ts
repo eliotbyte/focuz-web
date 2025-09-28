@@ -2,6 +2,8 @@ import { db, getKV, setKV } from './db'
 
 export type ToastAction =
   | { type: 'undo-delete-note'; label: string; payload: { noteId: number } }
+  | { type: 'undo-delete-filter'; label: string; payload: { filterId: number } }
+  | { type: 'undo-delete-filters-bulk'; label: string; payload: { filterIds: number[] } }
 
 export interface ToastItem {
   id: string
@@ -107,6 +109,23 @@ export async function invokeAction(id: string): Promise<void> {
         await db.notes.update(noteId, { deletedAt: null, modifiedAt: now, isDirty: 1 })
         try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
       }
+    } else if (a.type === 'undo-delete-filter') {
+      const filterId = a.payload.filterId
+      const rec = await db.filters.get(filterId)
+      if (rec && rec.deletedAt) {
+        const now = new Date().toISOString()
+        await db.filters.update(filterId, { deletedAt: null, modifiedAt: now, isDirty: 1 })
+        try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+      }
+    } else if (a.type === 'undo-delete-filters-bulk') {
+      const now = new Date().toISOString()
+      for (const id of a.payload.filterIds) {
+        const rec = await db.filters.get(id)
+        if (rec && rec.deletedAt) {
+          await db.filters.update(id, { deletedAt: null, modifiedAt: now, isDirty: 1 })
+        }
+      }
+      try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
     }
   } finally {
     await dismissToast(id)

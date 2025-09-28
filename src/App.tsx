@@ -3,7 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db, setKV, getKV } from './lib/db'
 import type { NoteRecord, FilterRecord, SpaceRecord } from './lib/types'
 import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote, onAuthRequired, isAuthRequired, getLastUsername, addLocalAttachment, teardownSync, purgeAndLogout } from './lib/sync'
-import { updateNoteLocal } from './lib/sync'
+import { updateNoteLocal, createFilterLocal, updateFilterLocal } from './lib/sync'
 import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
 import Toasts from './components/Toasts'
 import NoteEditor, { type NoteEditorValue } from './components/NoteEditor'
@@ -138,40 +138,256 @@ function SpaceDrawer({ open, onClose, currentId, onSelected }: { open: boolean; 
   )
 }
 
-function FiltersList({ spaceId, onSelect }: { spaceId: number; onSelect: (f: FilterRecord | null) => void }) {
+function FiltersList({ spaceId, selectedId, onSelect }: { spaceId: number; selectedId?: number | null; onSelect: (f: FilterRecord | null) => void }) {
   const filters = useLiveQuery(() => db.filters.where('spaceId').equals(spaceId).filter(f => !f.deletedAt).toArray(), [spaceId]) ?? []
-  async function addDefault() {
-    const now = new Date().toISOString()
-    const id = await db.filters.add({
-      name: 'All notes',
-      params: { sort: 'modifiedat,DESC' },
-      spaceId,
-      parentId: null,
-      serverId: null,
-      createdAt: now,
-      modifiedAt: now,
-      deletedAt: null,
-      isDirty: 1,
-    })
-    window.dispatchEvent(new Event('focuz:local-write'))
-    const rec = await db.filters.get(id)
-    onSelect(rec!)
+  const [collapsed, setCollapsed] = useState<Record<number, boolean>>({})
+  const [manage, setManage] = useState(false)
+  const [dragId, setDragId] = useState<number | null>(null)
+  const [dropOver, setDropOver] = useState<{ id: number; pos: 'before' | 'after' | 'inside' } | null>(null)
+  const ref = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!manage) return
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current) return
+      if (!ref.current.contains(e.target as Node)) setManage(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => { document.removeEventListener('mousedown', onDown) }
+  }, [manage])
+
+  type TreeNode = { rec: FilterRecord; id: number; serverId: number | null; clientId?: string | null; parentServerId: number | null; parentClientId?: string | null; depth: number; children: TreeNode[] }
+  const treeRoots = useMemo(() => {
+    const byLocal = new Map<number, FilterRecord>()
+    const byServer = new Map<number, FilterRecord>()
+    const byClient = new Map<string, FilterRecord>()
+    for (const f of filters) {
+      if (f.id) byLocal.set(f.id, f)
+      if (typeof f.serverId === 'number') byServer.set(f.serverId!, f)
+      if (f.clientId) byClient.set(f.clientId, f)
+    }
+    const nodesByLocal = new Map<number, TreeNode>()
+    const roots: TreeNode[] = []
+    function ensureNode(f: FilterRecord): TreeNode {
+      const key = f.id!
+      let n = nodesByLocal.get(key)
+      if (n) return n
+      n = { rec: f, id: f.id!, serverId: f.serverId ?? null, clientId: f.clientId ?? null, parentServerId: f.parentId ?? null, parentClientId: (f.params as any)?._parentClientId ?? null, depth: 0, children: [] }
+      nodesByLocal.set(key, n)
+      return n
+    }
+    for (const f of filters) ensureNode(f)
+    for (const n of nodesByLocal.values()) n.children = []
+    for (const n of nodesByLocal.values()) {
+      let parent: TreeNode | null = null
+      if (n.parentServerId != null) {
+        const p = byServer.get(n.parentServerId)
+        if (p?.id) parent = nodesByLocal.get(p.id) || null
+      } else if (n.parentClientId) {
+        const p = byClient.get(n.parentClientId)
+        if (p?.id) parent = nodesByLocal.get(p.id) || null
+      }
+      if (parent) parent.children.push(n)
+      else roots.push(n)
+    }
+    // sort helper by params._order then name then createdAt
+    const cmp = (a: TreeNode, b: TreeNode) => {
+      const ao = ((a.rec.params as any)?._order ?? 1e9) as number
+      const bo = ((b.rec.params as any)?._order ?? 1e9) as number
+      if (ao !== bo) return ao - bo
+      const an = a.rec.name.toLowerCase()
+      const bn = b.rec.name.toLowerCase()
+      if (an !== bn) return an < bn ? -1 : 1
+      return a.rec.createdAt.localeCompare(b.rec.createdAt)
+    }
+    function markDepth(node: TreeNode, d: number) {
+      node.depth = d
+      node.children.sort(cmp)
+      for (const ch of node.children) markDepth(ch, d + 1)
+    }
+    roots.sort(cmp)
+    for (const r of roots) markDepth(r, 0)
+    return roots
+  }, [JSON.stringify(filters)])
+
+  const flat = useMemo(() => {
+    const out: Array<{ node: TreeNode; hidden: boolean }> = []
+    const walk = (n: TreeNode, hidden: boolean) => {
+      out.push({ node: n, hidden })
+      const isCollapsed = !!collapsed[n.id]
+      for (const ch of n.children) walk(ch, hidden || isCollapsed)
+    }
+    for (const r of treeRoots) walk(r, false)
+    return out
+  }, [treeRoots, collapsed])
+
+  async function toggleCollapse(id: number) {
+    setCollapsed(s => ({ ...s, [id]: !s[id] }))
   }
+
+  async function deleteWithChildren(localId: number) {
+    // collect descendants
+    const ids: number[] = []
+    const byId = new Map<number, TreeNode>(flat.map(x => [x.node.id, x.node]))
+    function collect(id: number) {
+      ids.push(id)
+      const n = byId.get(id)
+      if (!n) return
+      for (const ch of n.children) collect(ch.id)
+    }
+    collect(localId)
+    const now = new Date().toISOString()
+    await db.transaction('rw', db.filters, async () => {
+      for (const id of ids) await db.filters.update(id, { deletedAt: now, modifiedAt: now, isDirty: 1 })
+    })
+    try {
+      const { addToast } = await import('./lib/toast')
+      addToast({ message: 'Filters deleted', action: { type: 'undo-delete-filters-bulk', label: 'Undo', payload: { filterIds: ids } } })
+    } catch {}
+    if (selectedId && ids.includes(selectedId)) onSelect(null)
+  }
+
+  useEffect(() => {
+    const handler = (e: CustomEvent) => {
+      const id = (e.detail?.id as number) || 0
+      if (id) deleteWithChildren(id)
+    }
+    window.addEventListener('focuz:delete-filter-request', handler as any)
+    return () => { window.removeEventListener('focuz:delete-filter-request', handler as any) }
+  }, [flat, selectedId])
+
+  async function applyReparentAndOrder(dragLocalId: number, targetLocalId: number, pos: 'before' | 'after' | 'inside') {
+    const drag = flat.find(x => x.node.id === dragLocalId)?.node
+    const target = flat.find(x => x.node.id === targetLocalId)?.node
+    if (!drag || !target) return
+    // Prevent dropping into own subtree
+    if (dragLocalId === targetLocalId) return
+    let ancestor: TreeNode | undefined = target
+    while (ancestor) {
+      if (ancestor.id === dragLocalId) return
+      const parentServerOrClient: number | string | null = ancestor.parentServerId != null ? ancestor.parentServerId : (ancestor.parentClientId || null)
+      if (parentServerOrClient == null) break
+      ancestor = flat.find(x => (typeof parentServerOrClient === 'number' ? (x.node.serverId === parentServerOrClient) : (x.node.clientId === parentServerOrClient)))?.node
+    }
+
+    let newParentServerId: number | null = null
+    let newParentClientId: string | null = null
+    if (pos === 'inside') {
+      newParentServerId = target.serverId ?? null
+      newParentClientId = target.serverId ? null : (target.clientId || null)
+    } else {
+      // sibling of target → inherit its parent
+      if (target.parentServerId != null) newParentServerId = target.parentServerId
+      else if (target.parentClientId) newParentClientId = target.parentClientId
+    }
+
+    // Compute sibling list of destination parent for ordering
+    const siblings = flat
+      .filter(x => !x.hidden)
+      .map(x => x.node)
+      .filter(n => (pos === 'inside' ? (n.parentServerId === newParentServerId && (n.parentClientId || null) === (newParentClientId || null)) : (n.parentServerId === target.parentServerId && (n.parentClientId || null) === (target.parentClientId || null))))
+      .filter(n => n.id !== dragLocalId)
+
+    let insertIndex = siblings.findIndex(n => n.id === targetLocalId)
+    if (pos === 'after') insertIndex++
+    if (insertIndex < 0) insertIndex = siblings.length
+
+    const ordered = [...siblings]
+    ordered.splice(insertIndex, 0, drag)
+    // Assign incremental _order
+    const updates: Array<{ id: number; params: any }> = []
+    for (let i = 0; i < ordered.length; i++) {
+      const n = ordered[i]
+      const p = { ...(n.rec.params as any), _order: (i + 1) * 10 }
+      updates.push({ id: n.id, params: p })
+    }
+    const now = new Date().toISOString()
+    await db.transaction('rw', db.filters, async () => {
+      // update parent for dragged
+      if (newParentServerId != null) await db.filters.update(dragLocalId, { parentId: newParentServerId, isDirty: 1, modifiedAt: now, params: { ...(drag.rec.params as any), _parentClientId: undefined } as any })
+      else await db.filters.update(dragLocalId, { parentId: null, isDirty: 1, modifiedAt: now, params: { ...(drag.rec.params as any), _parentClientId: newParentClientId || undefined } as any })
+      // update orders
+      for (const u of updates) await db.filters.update(u.id, { params: u.params as any, isDirty: 1, modifiedAt: now })
+    })
+    try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+  }
+
+  function onDragStart(e: React.DragEvent, id: number) {
+    setDragId(id)
+    e.dataTransfer.effectAllowed = 'move'
+  }
+  function onDragOver(e: React.DragEvent, id: number) {
+    e.preventDefault()
+    if (dragId == null) return
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const y = e.clientY - rect.top
+    const pos: 'before' | 'after' | 'inside' = y < rect.height * 0.25 ? 'before' : y > rect.height * 0.75 ? 'after' : 'inside'
+    setDropOver({ id, pos })
+  }
+  function onDragLeave() { setDropOver(d => d) }
+  async function onDrop(e: React.DragEvent, id: number) {
+    e.preventDefault()
+    const d = dropOver
+    setDropOver(null)
+    const drag = dragId
+    setDragId(null)
+    if (drag == null || !d || d.id !== id) return
+    await applyReparentAndOrder(drag, id, d.pos)
+  }
+
   return (
     <aside className="hidden md:block w-64 shrink-0">
-      <div className="card">
-        <div className="mb-2 font-medium">Filters</div>
-        <ul className="space-y-2">
-          {filters.map(f => (
-            <li key={f.id}>
-              <button className="w-full text-left input" onClick={() => onSelect(f)}>{f.name}</button>
-            </li>
-          ))}
-          {filters.length === 0 && <div className="text-sm text-neutral-400">No filters</div>}
-        </ul>
-        <div className="mt-3 flex justify-end">
-          <button className="button" onClick={addDefault}>+ Add</button>
+      <div className="card" ref={ref}>
+        <div className="mb-2 font-medium flex items-center justify-between">
+          <span>Filters</span>
+          <button className={`text-xs ${manage ? 'text-sky-400' : 'text-neutral-400 hover:text-neutral-200'}`} onClick={() => setManage(m => !m)}>Manage</button>
         </div>
+        <ul className="space-y-1">
+          <li>
+            <div className={`relative flex items-center justify-between px-2 py-1 text-sm cursor-pointer ${(!selectedId ? 'text-neutral-100' : 'text-neutral-300')}`} onClick={() => onSelect(null)}>
+              <span className="truncate">No filters</span>
+            </div>
+          </li>
+          {flat.map(({ node, hidden }) => (
+            hidden ? null : (
+              <li key={node.id}
+                draggable={manage}
+                onDragStart={(e) => onDragStart(e, node.id)}
+                onDragOver={(e) => onDragOver(e, node.id)}
+                onDragLeave={onDragLeave}
+                onDrop={(e) => onDrop(e, node.id)}
+              >
+                <div className={`relative flex items-center justify-between px-2 py-1 text-sm cursor-pointer ${selectedId === node.id ? 'bg-neutral-800 text-neutral-100 rounded' : 'text-neutral-300 hover:text-neutral-100'}`}
+                  onClick={() => onSelect(node.rec)}
+                  style={{ paddingLeft: `${8 + node.depth * 14 + (node.children.length > 0 ? 14 : 0)}px` }}
+                >
+                  {/* collapse/expand icon positioned without affecting indent */}
+                  {node.children.length > 0 && (
+                    <button
+                      className="absolute text-neutral-500 hover:text-neutral-200"
+                      style={{ left: `${8 + node.depth * 14}px` }}
+                      onClick={(e) => { e.stopPropagation(); toggleCollapse(node.id) }}
+                      title={collapsed[node.id] ? 'Expand' : 'Collapse'}
+                    >
+                      {collapsed[node.id] ? '+' : '−'}
+                    </button>
+                  )}
+                  <span className="truncate">{node.rec.name}</span>
+                  {manage && (
+                    <button className="px-1 text-neutral-500 hover:text-neutral-200" title="Delete filter" onClick={(e) => { e.stopPropagation(); deleteWithChildren(node.id) }}>×</button>
+                  )}
+                </div>
+                {dropOver && dropOver.id === node.id && (
+                  <div className="px-2">
+                    {dropOver.pos === 'before' && <div className="h-0.5 bg-sky-600 rounded" />}
+                    {dropOver.pos === 'inside' && <div className="h-0.5 bg-transparent" />}
+                    {dropOver.pos === 'after' && <div className="h-0.5 bg-sky-600 rounded" />}
+                  </div>
+                )}
+              </li>
+            )
+          ))}
+        </ul>
       </div>
     </aside>
   )
@@ -236,6 +452,11 @@ function QuickFiltersPanel({
             <option value="ASC">asc</option>
           </select>
         </div>
+        {!hideNoParents && spaceId && (
+          <div className="flex justify-between pt-2">
+            <button className="button" onClick={() => window.dispatchEvent(new CustomEvent('focuz:open-save-filter'))}>Save</button>
+          </div>
+        )}
       </div>
     </aside>
   )
@@ -607,6 +828,8 @@ function App() {
   const [selectedFilter, setSelectedFilter] = useState<FilterRecord | null>(null)
   const [needReauth, setNeedReauth] = useState<boolean>(() => isAuthRequired())
   const [currentNoteId, setCurrentNoteId] = useState<number | null>(null)
+  const [saveOpen, setSaveOpen] = useState(false)
+  const [saveName, setSaveName] = useState('')
   // In-memory back trail within tab. Oldest -> newest. Excludes current page. null represents feed (space root)
   const historyTrailRef = useRef<Array<number | null>>([])
 
@@ -619,16 +842,18 @@ function App() {
   }, [])
 
   // URL helpers
-  function parseQuery(): { space?: number; note?: number } {
+  function parseQuery(): { space?: number; note?: number; filter?: number } {
     const p = new URLSearchParams(location.search)
     const space = p.get('space')
     const note = p.get('note')
-    return { space: space ? Number(space) : undefined, note: note ? Number(note) : undefined }
+    const filter = p.get('filter')
+    return { space: space ? Number(space) : undefined, note: note ? Number(note) : undefined, filter: filter ? Number(filter) : undefined }
   }
-  function pushQuery(next: { space: number; note?: number | null }, replace = false) {
+  function pushQuery(next: { space: number; note?: number | null; filter?: number | null }, replace = false) {
     const params = new URLSearchParams()
     params.set('space', String(next.space))
     if (next.note != null) params.set('note', String(next.note))
+    if (next.filter != null) params.set('filter', String(next.filter))
     const url = `${location.pathname}?${params.toString()}`
     if (replace) history.replaceState(null, '', url)
     else history.pushState(null, '', url)
@@ -640,12 +865,18 @@ function App() {
     if (!authed) return
 
     // initial from URL
-    const { space, note } = parseQuery()
+    const { space, note, filter } = parseQuery()
     ensureDefaultSpace().then(async () => {
       const id = space || await getCurrentSpaceId()
       setCurrentSpaceId(id)
       setCurrentNoteId(note ?? null)
       historyTrailRef.current = note ? [null] : []
+      if (filter) {
+        const foundLocal = await db.filters.get(filter)
+        const foundServer = foundLocal ? null : await db.filters.where('serverId').equals(filter).first()
+        const found = foundLocal || foundServer
+        if (found && found.spaceId === id) setSelectedFilter(found)
+      }
       // load persisted quick filters
       if (note) {
         const saved = await getKV<typeof quickThread>(`quick:space:${id}:note:${note}`)
@@ -658,13 +889,22 @@ function App() {
       await runSync()
       setTimeout(() => { runSync() }, 1000)
       // normalize URL
-      pushQuery({ space: id, note: note ?? null }, true)
+      pushQuery({ space: id, note: note ?? null, filter: (filter ?? null) }, true)
     })
 
     const onPop = () => {
-      const { space: s, note: n } = parseQuery()
+      const { space: s, note: n, filter: f } = parseQuery()
       if (s) setCurrentSpaceId(s)
       setCurrentNoteId(n ?? null)
+      if (f == null) setSelectedFilter(null)
+      else {
+        void (async () => {
+          const byLocal = await db.filters.get(f)
+          const byServer = byLocal ? null : await db.filters.where('serverId').equals(f).first()
+          const rec = byLocal || byServer || null
+          setSelectedFilter(rec)
+        })()
+      }
     }
     window.addEventListener('popstate', onPop)
 
@@ -677,6 +917,67 @@ function App() {
       try { cleanup() } catch {}
     }
   }, [authed])
+
+  useEffect(() => {
+    const onOpenSave = () => setSaveOpen(true)
+    window.addEventListener('focuz:open-save-filter', onOpenSave as any)
+    return () => { window.removeEventListener('focuz:open-save-filter', onOpenSave as any) }
+  }, [])
+
+  const currentQuick = currentNoteId ? quickThread : quickFeed
+
+  async function handleSaveOrUpdate(kind: 'save' | 'update' | 'save-as-new') {
+    if (!currentSpaceId) return
+    const params: any = {
+      textContains: (currentQuick.text || '').trim() || undefined,
+      includeTags: (currentQuick.tags || []).filter(t => !t.startsWith('!')),
+      excludeTags: (currentQuick.tags || []).filter(t => t.startsWith('!')).map(t => t.slice(1)),
+      notReply: currentQuick.noParents || undefined,
+      sort: currentQuick.sort,
+    }
+    if (kind === 'update' && selectedFilter?.id) {
+      await updateFilterLocal(selectedFilter.id, { name: (saveName.trim() ? saveName.trim() : undefined), params })
+      const rec = await db.filters.get(selectedFilter.id)
+      setSelectedFilter(rec || null)
+      setSaveOpen(false)
+      setSaveName('')
+      if (currentSpaceId) pushQuery({ space: currentSpaceId, note: currentNoteId, filter: rec?.id ?? null })
+      return
+    }
+    const parentServerId = (kind === 'save-as-new' ? (selectedFilter?.serverId ?? null) : null) ?? null
+    const localId = await createFilterLocal(currentSpaceId, (saveName.trim() || (selectedFilter?.name ?? '')), params, parentServerId)
+    const rec = await db.filters.get(localId)
+    setSelectedFilter(rec || null)
+    setSaveOpen(false)
+    setSaveName('')
+    if (currentSpaceId) pushQuery({ space: currentSpaceId, note: currentNoteId, filter: rec?.id ?? null })
+  }
+
+  // When a saved filter is selected on the feed, reflect it in Quick filters
+  useEffect(() => {
+    if (!currentSpaceId) return
+    if (currentNoteId != null) return
+    const applyFrom = async () => {
+      if (selectedFilter) {
+        const p: any = selectedFilter.params || {}
+        const include = Array.isArray(p.includeTags) ? p.includeTags : []
+        const exclude = Array.isArray(p.excludeTags) ? p.excludeTags.map((t: string) => `!${t}`) : []
+        const text = typeof p.textContains === 'string' ? p.textContains : ''
+        const noParents = !!p.notReply
+        const sort = (typeof p.sort === 'string' ? p.sort : 'modifiedat,DESC') as `${SortField},ASC` | `${SortField},DESC`
+        const next = { text, tags: [...include, ...exclude], noParents, sort }
+        setQuickFeed(next)
+        await setKV(`quick:space:${currentSpaceId}` , next)
+      } else {
+        const next = { text: '', tags: [], noParents: false, sort: 'modifiedat,DESC' as `${SortField},ASC` | `${SortField},DESC` }
+        setQuickFeed(next)
+        await setKV(`quick:space:${currentSpaceId}` , next)
+      }
+    }
+    applyFrom().catch(() => {})
+  // Only update Quick when the selected filter changes, not on quick edits
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFilter, currentSpaceId, currentNoteId])
 
   function openThread(noteId: number) {
     if (!currentSpaceId) return
@@ -691,7 +992,7 @@ function App() {
       }
     }
     setCurrentNoteId(noteId)
-    pushQuery({ space: currentSpaceId, note: noteId })
+    pushQuery({ space: currentSpaceId, note: noteId, filter: selectedFilter?.id ?? null })
     // load thread quick
     void (async () => {
       const key = `quick:space:${currentSpaceId}:note:${noteId}`
@@ -718,7 +1019,7 @@ function App() {
     if (prev.length === 0) {
       // back to feed
       setCurrentNoteId(null)
-      pushQuery({ space: currentSpaceId, note: null })
+      pushQuery({ space: currentSpaceId, note: null, filter: selectedFilter?.id ?? null })
       // load feed quick
       void (async () => {
         const saved = await getKV<typeof quickFeed>(`quick:space:${currentSpaceId}`)
@@ -730,7 +1031,7 @@ function App() {
     const target = prev[prev.length - 1]
     historyTrailRef.current = next
     setCurrentNoteId(target ?? null)
-    pushQuery({ space: currentSpaceId, note: target ?? null })
+    pushQuery({ space: currentSpaceId, note: target ?? null, filter: selectedFilter?.id ?? null })
     // load respective quick
     void (async () => {
       if (target == null) {
@@ -745,7 +1046,19 @@ function App() {
 
   if (!authed) return <AuthScreen onDone={() => setAuthed(true)} />
 
-  const left = currentSpaceId ? <FiltersList spaceId={currentSpaceId} onSelect={setSelectedFilter} /> : null
+  const left = currentSpaceId ? (
+    <FiltersList
+      spaceId={currentSpaceId}
+      selectedId={selectedFilter?.id ?? null}
+      onSelect={(f) => {
+        setSelectedFilter(f)
+        if (currentSpaceId) pushQuery({ space: currentSpaceId, note: currentNoteId, filter: f?.id ?? null })
+        if (currentNoteId) {
+          setCurrentNoteId(null)
+        }
+      }}
+    />
+  ) : null
   let center: ReactNode = null
   if (currentSpaceId) {
     if (currentNoteId) {
@@ -771,7 +1084,7 @@ function App() {
           <NoteComposer spaceId={currentSpaceId} positiveQuickTags={(quickFeed.tags || []).filter(t => !t.startsWith('!'))} />
           <NoteList
             spaceId={currentSpaceId}
-            filter={selectedFilter}
+            filter={null}
             quick={quickFeed}
             onOpenThread={openThread}
             onAddQuickTag={(tag) => {
@@ -812,6 +1125,26 @@ function App() {
       {drawerOpen && <SpaceDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} currentId={currentSpaceId} onSelected={(id) => { openSpace(id) }} />}
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
       {needReauth && <ReauthOverlay onDone={() => setNeedReauth(false)} />}
+      {saveOpen && (
+        <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50">
+          <div className="w-full sm:max-w-md bg-neutral-900 border border-neutral-800 rounded-t-xl sm:rounded-xl p-4 space-y-3">
+            <h2 className="text-lg font-medium">Save filter</h2>
+            <input
+              className="input"
+              placeholder={selectedFilter ? (selectedFilter.name || 'enter filter name') : 'enter filter name'}
+              value={saveName}
+              onChange={e => setSaveName(e.target.value)}
+            />
+            <div className="flex justify-between">
+              <button className="button" onClick={() => handleSaveOrUpdate('save-as-new')}>Save as new</button>
+              <div className="flex gap-2">
+                <button className="button" onClick={() => { setSaveOpen(false); setSaveName('') }}>Cancel</button>
+                <button className="button" onClick={() => handleSaveOrUpdate((selectedFilter?.id ? 'update' : 'save'))}>{selectedFilter?.id ? 'Update' : 'Save'}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       <Toasts />
     </div>
   )

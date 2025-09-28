@@ -206,6 +206,40 @@ export async function deleteNote(localId: number): Promise<void> {
   await db.notes.update(localId, { deletedAt: now, modifiedAt: now, isDirty: 1 })
 }
 
+export async function createFilterLocal(spaceId: number, name: string, params: any, parentServerId?: number | null): Promise<number> {
+  const now = new Date().toISOString()
+  const id = await db.filters.add({
+    spaceId,
+    name,
+    params,
+    parentId: parentServerId ?? null,
+    createdAt: now,
+    modifiedAt: now,
+    deletedAt: null,
+    isDirty: 1,
+    serverId: null,
+    clientId: crypto.randomUUID(),
+  } as unknown as FilterRecord)
+  try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+  return id
+}
+
+export async function updateFilterLocal(localId: number, changes: { name?: string; params?: any; parentServerId?: number | null }): Promise<void> {
+  const now = new Date().toISOString()
+  const partial: any = { modifiedAt: now, isDirty: 1 }
+  if (typeof changes.name === 'string') partial.name = changes.name
+  if (typeof changes.parentServerId !== 'undefined') partial.parentId = (changes.parentServerId ?? null)
+  if (typeof changes.params !== 'undefined') partial.params = changes.params
+  await db.filters.update(localId, partial)
+  try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+}
+
+export async function deleteFilterLocal(localId: number): Promise<void> {
+  const now = new Date().toISOString()
+  await db.filters.update(localId, { deletedAt: now, modifiedAt: now, isDirty: 1 })
+  try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+}
+
 export async function updateNoteLocal(localId: number, changes: { text?: string; tags?: string[] }): Promise<void> {
   const now = new Date().toISOString()
   await db.notes.update(localId, { ...changes, modifiedAt: now, isDirty: 1 })
@@ -292,9 +326,10 @@ function toNoteChange(n: NoteRecord) {
 function toFilterChange(f: FilterRecord) {
   return {
     id: f.serverId ?? null,
+    clientId: f.serverId ? null : (f.clientId || `tmp-${f.id}`),
     space_id: 0,
     user_id: undefined,
-    parent_id: null,
+    parent_id: (f.parentId ?? null),
     name: f.name,
     params: f.params as any,
     created_at: f.createdAt,
@@ -400,6 +435,20 @@ async function pushDirty() {
             if (x.id !== keep!.id) {
               await db.notes.delete(x.id!)
             }
+          }
+        }
+      } else if (m.resource === 'filter' || m.resource === 'filters') {
+        const local = await db.filters.where('clientId').equals(m.clientId).first()
+        if (local) await db.filters.update(local.id!, { serverId: m.serverId })
+        // If any children were temporarily referencing this parent via params._parentClientId,
+        // fix them up to use server parent_id and mark dirty for push
+        const all = await db.filters.toArray()
+        for (const ch of all) {
+          const p = (ch.params as any) || {}
+          if (p && p._parentClientId === m.clientId) {
+            const nextParams = { ...p }
+            delete nextParams._parentClientId
+            await db.filters.update(ch.id!, { parentId: m.serverId, params: nextParams as any, isDirty: 1, modifiedAt: new Date().toISOString() })
           }
         }
       }

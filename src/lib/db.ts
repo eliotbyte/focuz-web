@@ -47,7 +47,19 @@ class AppDatabase extends Dexie {
       spaces: '++id, serverId, name, createdAt, modifiedAt, deletedAt, isDirty',
       notes: '++id, serverId, clientId, spaceId, parentId, date, createdAt, modifiedAt, deletedAt, isDirty',
       tags: '++id, serverId, spaceId, name, createdAt, modifiedAt, deletedAt, isDirty',
-      filters: '++id, serverId, spaceId, parentId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      filters: '++id, serverId, clientId, spaceId, parentId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      activities: '++id, serverId, noteId, createdAt, modifiedAt, deletedAt, isDirty',
+      charts: '++id, serverId, noteId, createdAt, modifiedAt, deletedAt, isDirty',
+      meta: 'key',
+      attachments: '++id, serverId, noteId, fileName, createdAt, modifiedAt, deletedAt, isDirty',
+      jobs: '++id, kind, attachmentId, priority, status, attempts, createdAt, updatedAt',
+    })
+    // Bump version to add clientId to filters index without data loss
+    this.version(5).stores({
+      spaces: '++id, serverId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      notes: '++id, serverId, clientId, spaceId, parentId, date, createdAt, modifiedAt, deletedAt, isDirty',
+      tags: '++id, serverId, spaceId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      filters: '++id, serverId, clientId, spaceId, parentId, name, createdAt, modifiedAt, deletedAt, isDirty',
       activities: '++id, serverId, noteId, createdAt, modifiedAt, deletedAt, isDirty',
       charts: '++id, serverId, noteId, createdAt, modifiedAt, deletedAt, isDirty',
       meta: 'key',
