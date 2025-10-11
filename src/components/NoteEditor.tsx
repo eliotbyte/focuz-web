@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useObjectUrl } from '../lib/useObjectUrl'
 import TagsInput from './TagsInput'
+import ActivitiesInput, { type ActivityDraft } from './ActivitiesInput'
 import { compressToWebP, getImageDimensions, validateImageGeometry } from '../lib/image'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '../lib/db'
@@ -12,6 +13,7 @@ export type NoteEditorMode = 'create' | 'edit' | 'reply'
 export interface NoteEditorValue {
   text: string
   tags: string[]
+  activities?: ActivityDraft[]
 }
 
 export default function NoteEditor({
@@ -46,6 +48,8 @@ export default function NoteEditor({
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [attachments, setAttachments] = useState<File[]>([])
   const [menuOpen, setMenuOpen] = useState(false)
+  const [activities, setActivities] = useState<ActivityDraft[]>(value.activities || [])
+  const [editRequestTypeId, setEditRequestTypeId] = useState<number | null>(null)
 
   // Existing attachments for edit mode
   const existingAttachments = (useLiveQuery(async () => {
@@ -60,6 +64,28 @@ export default function NoteEditor({
   useEffect(() => {
     if (expanded) textRef.current?.focus()
   }, [expanded])
+
+  // Prefill activities for edit mode from DB if not provided (deduplicated per typeId)
+  const existingActivities = (useLiveQuery(async () => {
+    if (!noteId || mode !== 'edit') return [] as Array<{ typeId: number; valueRaw: string }>
+    const acts = await db.activities.where('noteId').equals(noteId).toArray()
+    const filtered = acts.filter(a => !a.deletedAt)
+    const bestByType = new Map<number, typeof filtered[number]>()
+    for (const a of filtered) {
+      const prev = bestByType.get(a.typeId)
+      if (!prev) { bestByType.set(a.typeId, a); continue }
+      const score = (Number(!!a.serverId) - Number(!!prev.serverId)) || ((a.modifiedAt || '').localeCompare(prev.modifiedAt || ''))
+      if (score > 0) bestByType.set(a.typeId, a)
+    }
+    return Array.from(bestByType.values()).map(a => ({ typeId: a.typeId, valueRaw: a.valueRaw }))
+  }, [noteId, mode]) || []) as Array<ActivityDraft>
+
+  useEffect(() => {
+    if (mode === 'edit' && activities.length === 0 && existingActivities.length > 0) {
+      setActivities(existingActivities)
+      onChange({ ...value, activities: existingActivities })
+    }
+  }, [mode, noteId, existingActivities])
 
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
@@ -99,6 +125,14 @@ export default function NoteEditor({
         placeholder={mode === 'reply' ? 'Reply…' : 'Add note…'}
         value={value.text}
         onChange={e => onChange({ ...value, text: e.target.value })}
+      />
+      <ActivitiesInput
+        value={activities}
+        onChange={(acts) => { setActivities(acts); onChange({ ...value, activities: acts }) }}
+        spaceId={spaceId}
+        hideAddButton
+        requestEditTypeId={editRequestTypeId}
+        onEditRequestHandled={() => setEditRequestTypeId(null)}
       />
       <TagsInput value={value.tags} onChange={tags => onChange({ ...value, tags })} placeholder="Add tags" spaceId={spaceId} />
       {mode === 'edit' && existingAttachments.length > 0 && attachments.length === 0 && (
@@ -219,6 +253,13 @@ export default function NoteEditor({
                   onClick={() => { setMenuOpen(false); fileInputRef.current?.click() }}
                   disabled={maxReached}
                 >Photo</button>
+                <ActivitiesInput
+                  value={activities}
+                  onChange={(acts) => { setActivities(acts); onChange({ ...value, activities: acts }); }}
+                  spaceId={spaceId}
+                  menuOnly
+                  onAddedType={(tid) => { setEditRequestTypeId(tid); setMenuOpen(false) }}
+                />
               </div>
             )}
           </div>

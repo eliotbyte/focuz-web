@@ -6,6 +6,7 @@ import type {
   TagRecord,
   FilterRecord,
   ActivityRecord,
+  ActivityTypeRecord,
   ChartRecord,
   AttachmentRecord,
   JobRecord,
@@ -17,6 +18,7 @@ class AppDatabase extends Dexie {
   tags!: Table<TagRecord, number>
   filters!: Table<FilterRecord, number>
   activities!: Table<ActivityRecord, number>
+  activityTypes!: Table<ActivityTypeRecord, number>
   charts!: Table<ChartRecord, number>
   meta!: Table<MetaKV, string>
   attachments!: Table<AttachmentRecord, number>
@@ -65,6 +67,27 @@ class AppDatabase extends Dexie {
       meta: 'key',
       attachments: '++id, serverId, noteId, fileName, createdAt, modifiedAt, deletedAt, isDirty',
       jobs: '++id, kind, attachmentId, priority, status, attempts, createdAt, updatedAt',
+    })
+    // Add activityTypes and refine activities to include typeId/valueRaw
+    this.version(6).stores({
+      spaces: '++id, serverId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      notes: '++id, serverId, clientId, spaceId, parentId, date, createdAt, modifiedAt, deletedAt, isDirty',
+      tags: '++id, serverId, spaceId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      filters: '++id, serverId, clientId, spaceId, parentId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      activities: '++id, serverId, noteId, typeId, createdAt, modifiedAt, deletedAt, isDirty',
+      activityTypes: '++id, serverId, spaceId, name, valueType, createdAt, modifiedAt, deletedAt',
+      charts: '++id, serverId, noteId, createdAt, modifiedAt, deletedAt, isDirty',
+      meta: 'key',
+      attachments: '++id, serverId, noteId, fileName, createdAt, modifiedAt, deletedAt, isDirty',
+      jobs: '++id, kind, attachmentId, priority, status, attempts, createdAt, updatedAt',
+    }).upgrade(tx => {
+      // Backfill typeId/valueRaw if upgrading from older schema; best-effort defaults
+      try {
+        return (tx.table('activities') as any).toCollection().modify((a: any) => {
+          if (typeof a.typeId !== 'number') a.typeId = 0
+          if (typeof a.valueRaw !== 'string') a.valueRaw = ''
+        })
+      } catch {}
     })
     // Ensure the connection closes on external version changes (e.g., deleteDatabase in another tab)
     try { this.on('versionchange', () => { try { this.close() } catch {} }) } catch {}

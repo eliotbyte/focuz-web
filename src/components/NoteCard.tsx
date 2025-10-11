@@ -4,7 +4,7 @@ import type { NoteRecord } from '../lib/types'
 import { db } from '../lib/db'
 import HighlightedText from './HighlightedText'
 import NoteImages from './NoteImages'
-import { formatExactDateTime, formatRelativeShort } from '../lib/time'
+import { formatExactDateTime, formatRelativeShort, formatDurationShort, parseDurationToMs } from '../lib/time'
 
 export default function NoteCard({
   note,
@@ -14,6 +14,7 @@ export default function NoteCard({
   childrenRight,
   showParentPreview = false,
   onTagClick,
+  onActivityClick,
   hiddenTags,
 }: {
   note: NoteRecord
@@ -23,10 +24,32 @@ export default function NoteCard({
   childrenRight?: React.ReactNode
   showParentPreview?: boolean
   onTagClick?: (tag: string) => void
+  onActivityClick?: (name: string) => void
   hiddenTags?: Set<string>
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const parentNote = useLiveQuery(() => showParentPreview && note.parentId ? db.notes.get(note.parentId) : Promise.resolve(undefined), [showParentPreview, note.parentId]) as NoteRecord | undefined
+  const activities = useLiveQuery(async () => {
+    const list = await db.activities.where('noteId').equals(note.id!).toArray()
+    const filtered = list.filter(a => !a.deletedAt)
+    // Deduplicate per typeId: prefer server-backed; fallback to most recent modifiedAt
+    const bestByType = new Map<number, typeof filtered[number]>()
+    for (const a of filtered) {
+      const prev = bestByType.get(a.typeId)
+      if (!prev) { bestByType.set(a.typeId, a); continue }
+      const score = (Number(!!a.serverId) - Number(!!prev.serverId)) || ((a.modifiedAt || '').localeCompare(prev.modifiedAt || ''))
+      if (score > 0) bestByType.set(a.typeId, a)
+    }
+    const deduped = Array.from(bestByType.values())
+    // join names and valueTypes
+    const types = await db.activityTypes.toArray()
+    const byId = new Map(types.map(t => [t.serverId!, t]))
+    return deduped.map(a => ({
+      ...a,
+      _name: byId.get(a.typeId)?.name || `#${a.typeId}`,
+      _valueType: byId.get(a.typeId)?.valueType || 'text',
+    }))
+  }, [note.id]) as Array<any> || []
 
   return (
     <div className="card-nopad">
@@ -57,6 +80,30 @@ export default function NoteCard({
           </div>
         )}
         <HighlightedText className="block whitespace-pre-wrap leading-6 text-primary" text={note.text} query={''} />
+        {activities.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {activities.map((a, i) => (
+              <button
+                key={`${a.serverId ?? a.id}-${i}`}
+                type="button"
+                className="inline-flex items-center rounded-full bg-neutral-800 px-2 py-1 text-xs text-secondary hover:bg-neutral-700 select-none"
+                onClick={() => onActivityClick ? onActivityClick(a._name) : (onTagClick && onTagClick(a._name))}
+                title={`${a._name}: ${a.valueRaw}`}
+              >
+                <span className="mr-1 text-neutral-300">{a._name}:</span>
+                <span className="text-neutral-200">{(() => {
+                  if (a?._valueType === 'time') {
+                    const numMs = Number(a.valueRaw)
+                    if (Number.isFinite(numMs)) return formatDurationShort(numMs)
+                    const parsed = parseDurationToMs(String(a.valueRaw))
+                    if (Number.isFinite(parsed)) return formatDurationShort(parsed)
+                  }
+                  return a.valueRaw
+                })()}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <NoteImages noteId={note.id!} />
         {note.tags?.length ? (
           <div className="mt-2 flex flex-wrap gap-2">

@@ -73,6 +73,7 @@ export interface FilterParams {
   textContains?: string
   includeTags?: string[]
   excludeTags?: string[]
+  includeActivities?: string[]
   notReply?: boolean
   sort?:
     | 'date,ASC' | 'date,DESC'
@@ -98,12 +99,29 @@ export interface ActivityRecord {
   id?: number
   serverId?: number | null
   noteId: number
-  metricName: string
-  value: number
+  typeId: number
+  // Raw value as string normalized per type (e.g., "4532", "true", RFC3339 timestamp, or free text)
+  valueRaw: string
   createdAt: string
   modifiedAt: string
   deletedAt?: string | null
   isDirty: 0 | 1
+}
+
+export interface ActivityTypeRecord {
+  id?: number
+  serverId?: number | null
+  spaceId: number
+  name: string
+  valueType: 'integer' | 'float' | 'boolean' | 'text' | 'time'
+  minValue?: number | null
+  maxValue?: number | null
+  aggregation?: string | null
+  unit?: string | null
+  categoryId?: number | null
+  createdAt: string
+  modifiedAt: string
+  deletedAt?: string | null
 }
 
 export interface ChartRecord {

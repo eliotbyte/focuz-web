@@ -1,5 +1,6 @@
 import { db, getKV, setKV, wipeLocalData, deleteDatabase, deleteDatabaseWithRetry, ensureDbOpen } from './db'
-import type { FilterRecord, NoteRecord, SpaceRecord, TagRecord, AttachmentRecord, JobRecord } from './types'
+import { parseDurationToMs } from './time'
+import type { FilterRecord, NoteRecord, SpaceRecord, TagRecord, AttachmentRecord, JobRecord, ActivityRecord, ActivityTypeRecord } from './types'
 
 const API_BASE = (import.meta as any).env.VITE_API_BASE_URL as string | undefined
 const BASE_SYNC_INTERVAL_MS = Number(((import.meta as any).env.VITE_SYNC_INTERVAL_MS ?? '60000')) || 60000
@@ -206,6 +207,144 @@ export async function deleteNote(localId: number): Promise<void> {
   await db.notes.update(localId, { deletedAt: now, modifiedAt: now, isDirty: 1 })
 }
 
+// ---- Activities: local create/update + validation mirroring backend ----
+
+function parseBooleanLoose(v: string): boolean | null {
+  const s = v.trim().toLowerCase()
+  if (s === 'true' || s === '1' || s === 'yes') return true
+  if (s === 'false' || s === '0' || s === 'no') return false
+  return null
+}
+
+export async function createOrUpdateLocalActivity(noteLocalId: number, typeServerId: number, rawValue: string): Promise<number> {
+  const note = await db.notes.get(noteLocalId)
+  if (!note) throw new Error('Note not found')
+  const type = await db.activityTypes.where('serverId').equals(typeServerId).first()
+  if (!type) throw new Error('Activity type not found')
+  const checked = validateActivityValue(type, rawValue)
+  const now = new Date().toISOString()
+  // Uniqueness per (noteId, typeId); update if exists
+  const existing = await db.activities.where('noteId').equals(noteLocalId).filter(a => !a.deletedAt && a.typeId === typeServerId).first()
+  if (existing?.id) {
+    await db.activities.update(existing.id, { valueRaw: checked, modifiedAt: now, isDirty: 1 })
+    await db.notes.update(noteLocalId, { modifiedAt: now, isDirty: 1 })
+    try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+    return existing.id
+  }
+  const id = await db.activities.add({
+    noteId: noteLocalId,
+    serverId: null,
+    typeId: typeServerId,
+    valueRaw: checked,
+    createdAt: now,
+    modifiedAt: now,
+    deletedAt: null,
+    isDirty: 1,
+  } as ActivityRecord)
+  await db.notes.update(noteLocalId, { modifiedAt: now, isDirty: 1 })
+  try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+  return id
+}
+
+export async function deleteLocalActivity(noteLocalId: number, typeServerId: number): Promise<void> {
+  const now = new Date().toISOString()
+  const existing = await db.activities
+    .where('noteId').equals(noteLocalId)
+    .filter(a => !a.deletedAt && a.typeId === typeServerId)
+    .first()
+  if (existing?.id) {
+    await db.activities.update(existing.id, { deletedAt: now, modifiedAt: now, isDirty: 1 })
+    await db.notes.update(noteLocalId, { modifiedAt: now, isDirty: 1 })
+    try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+  }
+}
+
+export function validateActivityValue(t: ActivityTypeRecord, raw: string): string {
+  const trimmed = (raw ?? '').toString().trim()
+  if (!trimmed) throw new Error('Value is required')
+  switch (t.valueType) {
+    case 'integer': {
+      const v = Number(trimmed)
+      if (!Number.isInteger(v)) throw new Error('Value must be integer')
+      if (typeof t.minValue === 'number' && v < t.minValue) throw new Error('Value is out of range')
+      if (typeof t.maxValue === 'number' && v > t.maxValue) throw new Error('Value is out of range')
+      return String(v)
+    }
+    case 'float': {
+      const f = Number(trimmed)
+      if (!Number.isFinite(f)) throw new Error('Value must be float')
+      if (typeof t.minValue === 'number' && f < t.minValue) throw new Error('Value is out of range')
+      if (typeof t.maxValue === 'number' && f > t.maxValue) throw new Error('Value is out of range')
+      return String(f)
+    }
+    case 'boolean': {
+      const b = parseBooleanLoose(trimmed)
+      if (b == null) throw new Error('Value must be boolean')
+      return b ? 'true' : 'false'
+    }
+    case 'time': {
+      const ms = parseDurationToMs(trimmed)
+      if (!Number.isFinite(ms)) throw new Error('Value must be a duration (e.g. 1h 2m 3s 250ms)')
+      if (typeof t.minValue === 'number' && ms < t.minValue) throw new Error('Value is out of range')
+      if (typeof t.maxValue === 'number' && ms > t.maxValue) throw new Error('Value is out of range')
+      return String(Math.round(ms))
+    }
+    case 'text':
+    default:
+      return trimmed
+  }
+}
+
+function toServerActivityValue(t: ActivityTypeRecord | undefined, raw: string): any {
+  const base = (raw ?? '').toString()
+  const type = t?.valueType
+  try {
+    switch (type) {
+      case 'integer': return { data: Number.parseInt(base, 10) }
+      case 'float': return { data: Number(base) }
+      case 'boolean': {
+        const b = parseBooleanLoose(base)
+        return { data: !!b }
+      }
+      case 'time': {
+        // Convert milliseconds (string) to PostgreSQL interval literal like '1 hour 2 minutes 3 seconds'
+        const ms = Number(base)
+        if (!Number.isFinite(ms)) return { data: base }
+        const totalMs = Math.max(0, Math.round(ms))
+        const h = Math.floor(totalMs / 3600000)
+        const m = Math.floor((totalMs % 3600000) / 60000)
+        const s = Math.floor((totalMs % 60000) / 1000)
+        const msR = totalMs % 1000
+        let parts: string[] = []
+        if (h) parts.push(`${h} hour${h !== 1 ? 's' : ''}`)
+        if (m) parts.push(`${m} minute${m !== 1 ? 's' : ''}`)
+        if (s || (!h && !m && !msR)) parts.push(`${s} second${s !== 1 ? 's' : ''}`)
+        if (msR) parts.push(`${msR} milliseconds`)
+        const interval = parts.join(' ')
+        return { data: interval }
+      }
+      case 'text':
+      default: return { data: base }
+    }
+  } catch {
+    return { data: base }
+  }
+}
+
+function fromServerActivityValue(v: any): string {
+  if (v == null) return ''
+  if (typeof v === 'object' && 'data' in v) {
+    const d = (v as any).data
+    if (typeof d === 'boolean') return d ? 'true' : 'false'
+    if (typeof d === 'number') return String(d)
+    return String(d ?? '')
+  }
+  if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (typeof v === 'number') return String(v)
+  if (typeof v === 'string') return v
+  try { return JSON.stringify(v) } catch { return '' }
+}
+
 export async function createFilterLocal(spaceId: number, name: string, params: any, parentServerId?: number | null): Promise<number> {
   const now = new Date().toISOString()
   const id = await db.filters.add({
@@ -356,6 +495,7 @@ async function pushDirty() {
   const filters = await db.filters.where('isDirty').equals(1).toArray()
   const tags = await db.tags.where('isDirty').equals(1).toArray()
   const attachments = await db.attachments.where('isDirty').equals(1).toArray()
+  const activities = await db.activities.where('isDirty').equals(1).toArray()
 
   // Fallback: call deprecated delete endpoint for server-backed notes with deletedAt
   const deletions = notes.filter(n => n.deletedAt && n.serverId)
@@ -370,7 +510,7 @@ async function pushDirty() {
 
   const remainingNotes = await db.notes.where('isDirty').equals(1).toArray()
   const notesForSync = remainingNotes
-  if (notesForSync.length + filters.length + tags.length + attachments.length === 0) return { applied: 0 }
+  if (notesForSync.length + filters.length + tags.length + attachments.length + activities.length === 0) return { applied: 0 }
 
   const spaceServerIdByLocal = new Map<number, number>()
   async function toServerSpaceId(localId: number): Promise<number> {
@@ -386,8 +526,21 @@ async function pushDirty() {
     if (!dirtyByNoteLocal.has(a.noteId)) dirtyByNoteLocal.set(a.noteId, [])
     dirtyByNoteLocal.get(a.noteId)!.push(a)
   }
+  // Group dirty activities by note localId
+  const actByNoteLocal = new Map<number, ActivityRecord[]>()
+  for (const a of activities) {
+    if (!actByNoteLocal.has(a.noteId)) actByNoteLocal.set(a.noteId, [])
+    actByNoteLocal.get(a.noteId)!.push(a)
+  }
   // Ensure notes for which attachments are dirty are included in notesForSync
   for (const [noteLocalId] of dirtyByNoteLocal) {
+    if (!notesForSync.find(n => n.id === noteLocalId)) {
+      const note = await db.notes.get(noteLocalId)
+      if (note) notesForSync.push(note)
+    }
+  }
+  // Ensure notes for which activities are dirty are included
+  for (const [noteLocalId] of actByNoteLocal) {
     if (!notesForSync.find(n => n.id === noteLocalId)) {
       const note = await db.notes.get(noteLocalId)
       if (note) notesForSync.push(note)
@@ -397,32 +550,58 @@ async function pushDirty() {
     const space_id = await toServerSpaceId(n.spaceId)
     const base = { ...toNoteChange(n), space_id }
     const atts = dirtyByNoteLocal.get(n.id!) || []
-    if (atts.length === 0) return base
-    // Build minimal attachment updates: only server-backed items matter to server
-    const attPayload = atts
-      .filter(a => !!a.serverId)
-      .map(a => ({
-        id: a.serverId as string,
-        modified_at: a.modifiedAt,
-        is_deleted: !!a.deletedAt,
-      }))
-    return attPayload.length > 0 ? { ...base, attachments: attPayload } : base
+    const acts = actByNoteLocal.get(n.id!) || []
+
+    const out: any = { ...base }
+    if (atts.length > 0) {
+      // Build minimal attachment updates: only server-backed items matter to server
+      const attPayload = atts
+        .filter(a => !!a.serverId)
+        .map(a => ({
+          id: a.serverId as string,
+          modified_at: a.modifiedAt,
+          is_deleted: !!a.deletedAt,
+        }))
+      if (attPayload.length > 0) out.attachments = attPayload
+    }
+    if (acts.length > 0) {
+      // Build activity updates: include created/modified/deleted and value
+      // Load types for value parsing
+      const typeIds = Array.from(new Set(acts.map(a => a.typeId)))
+      const types = await db.activityTypes.where('serverId').anyOf(typeIds).toArray()
+      const typeById = new Map<number, ActivityTypeRecord>(types.map(t => [t.serverId!, t]))
+      const actPayload = acts.map(a => {
+        const t = typeById.get(a.typeId)
+        const value = toServerActivityValue(t, a.valueRaw)
+        return {
+          id: (a.serverId ?? null),
+          type_id: a.typeId,
+          value,
+          created_at: a.createdAt,
+          modified_at: a.modifiedAt,
+          deleted_at: a.deletedAt ?? null,
+        }
+      })
+      if (actPayload.length > 0) out.activities = actPayload
+    }
+    return out
   }))
   const filtersPayload = await Promise.all(filters.map(async (f) => ({ ...toFilterChange(f), space_id: await toServerSpaceId(f.spaceId) })))
   const tagsPayload = await Promise.all(tags.map(async (t) => ({ ...toTagChange(t), space_id: await toServerSpaceId(t.spaceId) })))
 
   const resp = await api('/sync', {
     method: 'POST',
-    body: JSON.stringify({ notes: notesPayload, filters: filtersPayload, tags: tagsPayload, charts: [], activities: [] }),
+    body: JSON.stringify({ notes: notesPayload, filters: filtersPayload, tags: tagsPayload, charts: [] }),
   })
 
   const mappings: Array<{ resource: string; clientId: string; serverId: number }> = resp?.data?.mappings ?? []
 
-  await db.transaction('rw', db.notes, db.filters, db.tags, db.attachments, async () => {
+  await db.transaction('rw', [db.notes, db.filters, db.tags, db.attachments, db.activities] as any, async () => {
     for (const n of notesForSync) await db.notes.update(n.id!, { isDirty: 0 })
     for (const f of filters) await db.filters.update(f.id!, { isDirty: 0 })
     for (const t of tags) await db.tags.update(t.id!, { isDirty: 0 })
     for (const a of attachments) await db.attachments.update(a.id!, { isDirty: 0 })
+    for (const a of activities) await db.activities.update(a.id!, { isDirty: 0 })
     for (const m of mappings) {
       if (m.resource === 'note' || m.resource === 'notes') {
         const local = await db.notes.where('clientId').equals(m.clientId).first()
@@ -451,6 +630,8 @@ async function pushDirty() {
             await db.filters.update(ch.id!, { parentId: m.serverId, params: nextParams as any, isDirty: 1, modifiedAt: new Date().toISOString() })
           }
         }
+      } else if (m.resource === 'activity' || m.resource === 'activities') {
+        // Map clientId activities if server echoes mapping; our activities currently do not use clientId, so skip
       }
     }
   })
@@ -473,15 +654,18 @@ async function pullSince() {
   for (const n of (data.notes ?? [])) updateMax(n.modified_at)
   for (const t of (data.tags ?? [])) updateMax(t.modified_at ?? t.created_at)
   for (const f of (data.filters ?? [])) updateMax(f.modified_at)
-  for (const a of (data.attachments ?? [])) updateMax(a.modified_at ?? a.created_at)
+  for (const at of (data.activityTypes ?? [])) updateMax(at.modified_at)
   for (const n of (data.notes ?? [])) {
     if (Array.isArray(n.attachments)) {
       for (const a of n.attachments) updateMax(a.modified_at ?? a.created_at)
     }
+    if (Array.isArray(n.activities)) {
+      for (const a of n.activities) updateMax(a.modified_at)
+    }
   }
 
   let pulled = 0
-  await db.transaction('rw', [db.spaces, db.notes, db.tags, db.filters, db.attachments, db.jobs] as any, async () => {
+  await db.transaction('rw', [db.spaces, db.notes, db.tags, db.filters, db.attachments, db.activities, db.activityTypes, db.jobs] as any, async () => {
     for (const s of (data.spaces ?? [])) {
       pulled++
       const existing = await db.spaces.where('serverId').equals(s.id).first()
@@ -560,6 +744,34 @@ async function pullSince() {
       else await db.filters.add(rec)
     }
 
+    // Activity Types
+    for (const t of (data.activityTypes ?? [])) {
+      pulled++
+      const existing = await db.activityTypes.where('serverId').equals(t.id).first()
+      let spaceLocalId = 0
+      if (typeof t.space_id === 'number') {
+        const s = await db.spaces.where('serverId').equals(t.space_id).first()
+        spaceLocalId = s?.id ?? 0
+      }
+      const rec: ActivityTypeRecord = {
+        id: existing?.id,
+        serverId: t.id,
+        spaceId: spaceLocalId,
+        name: t.name,
+        valueType: (t.value_type || t.valueType) as any,
+        minValue: typeof t.min_value === 'number' ? t.min_value : (typeof t.minValue === 'number' ? t.minValue : null),
+        maxValue: typeof t.max_value === 'number' ? t.max_value : (typeof t.maxValue === 'number' ? t.maxValue : null),
+        aggregation: (t.aggregation ?? null),
+        unit: (t.unit ?? null),
+        categoryId: (t.category_id ?? t.categoryId ?? null),
+        createdAt: t.created_at,
+        modifiedAt: t.modified_at,
+        deletedAt: t.deleted_at ?? null,
+      }
+      if (existing) await db.activityTypes.put(rec)
+      else await db.activityTypes.add(rec)
+    }
+
     const upsertAttachment = async (a: any) => {
       pulled++
       const existing = await db.attachments.where('serverId').equals(a.id).first()
@@ -589,14 +801,68 @@ async function pullSince() {
       }
     }
 
-    for (const a of (data.attachments ?? [])) {
-      await upsertAttachment(a)
-    }
+    // Top-level attachments removed in new API; rely on per-note attachments
     for (const n of (data.notes ?? [])) {
       for (const a of (n.attachments ?? [])) {
         // include parent note id if not present
         a.note_id = a.note_id ?? n.id
         await upsertAttachment(a)
+      }
+      // Upsert activities nested under notes with deduplication against local drafts
+      for (const a of (n.activities ?? [])) {
+        pulled++
+        const noteLocalId = (await db.notes.where('serverId').equals(n.id).first())?.id
+        if (!noteLocalId) continue
+
+        const existingByServer = (typeof a.id === 'number')
+          ? (await db.activities.where('serverId').equals(a.id).first())
+          : null
+        const localDup = await db.activities
+          .where('noteId').equals(noteLocalId)
+          .filter(x => !x.serverId && !x.deletedAt && x.typeId === a.type_id)
+          .first()
+
+        const rec: ActivityRecord = {
+          id: existingByServer?.id ?? localDup?.id,
+          serverId: (typeof a.id === 'number' ? a.id : null),
+          noteId: noteLocalId,
+          typeId: a.type_id,
+          valueRaw: fromServerActivityValue(a.value),
+          createdAt: a.created_at,
+          modifiedAt: a.modified_at,
+          deletedAt: a.deleted_at ?? null,
+          isDirty: 0,
+        }
+
+        if (existingByServer && localDup && existingByServer.id !== localDup.id) {
+          // Prefer server-backed record; update it and remove local duplicate
+          await db.activities.put({ ...rec, id: existingByServer.id })
+          await db.activities.delete(localDup.id!)
+        } else if (localDup && !existingByServer) {
+          // Promote local draft to server-backed by assigning serverId and server fields
+          await db.activities.put(rec)
+        } else if (existingByServer) {
+          await db.activities.put({ ...rec, id: existingByServer.id })
+        } else {
+          await db.activities.add(rec)
+        }
+
+        // Ensure only one activity per (noteId, typeId): remove any extras keeping the best candidate
+        const allOfType = await db.activities
+          .where('noteId').equals(noteLocalId)
+          .filter(x => !x.deletedAt && x.typeId === a.type_id)
+          .toArray()
+        if (allOfType.length > 1) {
+          // Choose winner: prefer with serverId; tie-breaker by latest modifiedAt
+          let winner = allOfType[0]
+          for (const it of allOfType.slice(1)) {
+            const prefer = (Number(!!it.serverId) - Number(!!winner.serverId)) || ((it.modifiedAt || '').localeCompare(winner.modifiedAt || ''))
+            if (prefer > 0) winner = it
+          }
+          for (const it of allOfType) {
+            if (it.id !== winner.id) await db.activities.delete(it.id!)
+          }
+        }
       }
     }
   })

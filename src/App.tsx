@@ -9,6 +9,7 @@ import Toasts from './components/Toasts'
 import NoteEditor, { type NoteEditorValue } from './components/NoteEditor'
 import NoteCard from './components/NoteCard'
 import TagsInput from './components/TagsInput'
+import ActivitiesPicker from './components/ActivitiesPicker'
 
 function TopBar({ onOpenSpaces, onOpenSettings, onLogout, isThread, onBack }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void; isThread?: boolean; onBack?: () => void }) {
   return (
@@ -401,13 +402,14 @@ function QuickFiltersPanel({
   hideNoParents = false,
   spaceId,
 }: {
-  value: { text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }
-  onChange: (v: { text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }) => void
+  value: { text: string; tags: string[]; activities?: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }
+  onChange: (v: { text: string; tags: string[]; activities?: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }) => void
   hideNoParents?: boolean
   spaceId?: number | null
 }) {
   const [text, setText] = useState(value.text)
   const [tags, setTags] = useState<string[]>(Array.isArray((value as any).tags) ? (value as any).tags : [])
+  const [activities, setActivities] = useState<string[]>(Array.isArray((value as any).activities) ? (value as any).activities : [])
   const [noParents, setNoParents] = useState(value.noParents)
   const [sortField, setSortField] = useState<SortField>(value.sort.split(',')[0] as SortField)
   const [sortDir, setSortDir] = useState<'ASC' | 'DESC'>(value.sort.split(',')[1] as 'ASC' | 'DESC')
@@ -415,6 +417,7 @@ function QuickFiltersPanel({
   useEffect(() => {
     setText(value.text)
     setTags(Array.isArray((value as any).tags) ? (value as any).tags : [])
+    setActivities(Array.isArray((value as any).activities) ? (value as any).activities : [])
     setNoParents(value.noParents)
     setSortField(value.sort.split(',')[0] as SortField)
     setSortDir(value.sort.split(',')[1] as 'ASC' | 'DESC')
@@ -428,13 +431,18 @@ function QuickFiltersPanel({
         <div>
           <TagsInput
             value={tags}
-            onChange={(next) => { setTags(next); onChange({ text, tags: next, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}
+            onChange={(next) => { setTags(next); onChange({ text, tags: next, activities, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}
             placeholder="Tags"
             className="mt-1"
             spaceId={spaceId ?? undefined}
             invertible
           />
         </div>
+        <ActivitiesPicker
+          value={activities}
+          onChange={(next) => { setActivities(next); onChange({ text, tags, activities: next, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}
+          spaceId={spaceId}
+        />
         {!hideNoParents && (
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={noParents} onChange={e => { setNoParents(e.target.checked); onChange({ text, tags, noParents: e.target.checked, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }} />
@@ -484,7 +492,15 @@ function NoteComposer({ spaceId, positiveQuickTags = [] }: { spaceId: number; po
       serverId: null,
       clientId: crypto.randomUUID(),
     }
-    await db.notes.add(payload)
+    const noteId = await db.notes.add(payload)
+    // Persist activities drafts (if any)
+    if (Array.isArray((value as any).activities)) {
+      const { createOrUpdateLocalActivity } = await import('./lib/sync')
+      for (const a of (value as any).activities) {
+        if (!a || typeof a.typeId !== 'number') continue
+        try { await createOrUpdateLocalActivity(noteId, a.typeId, String(a.valueRaw ?? '')) } catch {}
+      }
+    }
     window.dispatchEvent(new Event('focuz:local-write'))
     setValue({ text: '', tags: [] })
   }
@@ -507,6 +523,13 @@ function NoteComposer({ spaceId, positiveQuickTags = [] }: { spaceId: number; po
       serverId: null,
       clientId: crypto.randomUUID(),
     } as NoteRecord)
+    if (Array.isArray((value as any).activities)) {
+      const { createOrUpdateLocalActivity } = await import('./lib/sync')
+      for (const a of (value as any).activities) {
+        if (!a || typeof a.typeId !== 'number') continue
+        try { await createOrUpdateLocalActivity(noteId, a.typeId, String(a.valueRaw ?? '')) } catch {}
+      }
+    }
 
     const files = (extra.attachments ?? []).slice(0, 10)
     for (const f of files) {
@@ -520,14 +543,14 @@ function NoteComposer({ spaceId, positiveQuickTags = [] }: { spaceId: number; po
   }
 
   return (
-    <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onSubmitWithExtra={addNoteWithAttachments} onCancel={() => setValue({ text: '', tags: [] })} mode="create" spaceId={spaceId} />
+        <NoteEditor value={value} onChange={setValue} onSubmit={addNote} onSubmitWithExtra={addNoteWithAttachments} onCancel={() => setValue({ text: '', tags: [] })} mode="create" spaceId={spaceId} />
   )
 }
 
-function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTag }: { spaceId: number; filter: FilterRecord | null; quick: { text: string; tags?: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }; parentId?: number | null; onOpenThread?: (noteId: number) => void; onAddQuickTag?: (tag: string) => void }) {
+function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTag, onAddQuickActivity }: { spaceId: number; filter: FilterRecord | null; quick: { text: string; tags?: string[]; activities?: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }; parentId?: number | null; onOpenThread?: (noteId: number) => void; onAddQuickTag?: (tag: string) => void; onAddQuickActivity?: (name: string) => void }) {
   const [idsBySearch, setIdsBySearch] = useState<number[] | null>(null)
   const [editingId, setEditingId] = useState<number | null>(null)
-  const [editingValue, setEditingValue] = useState<{ text: string; tags: string[] }>({ text: '', tags: [] })
+  const [editingValue, setEditingValue] = useState<{ text: string; tags: string[]; activities?: any[] }>({ text: '', tags: [], activities: [] })
   const [replyingForId, setReplyingForId] = useState<number | null>(null)
 
   useEffect(() => {
@@ -580,6 +603,28 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
     }
     if (filter?.params?.includeTags?.length) {
       result = result.filter(n => filter!.params!.includeTags!.every(t => n.tags.includes(t)))
+    }
+    // Activities filter: include notes that have ALL selected activity type names
+    const includeActivitiesNames = new Set<string>([...(((filter?.params as any)?.includeActivities as string[]) || []), ...(((quick as any).activities as string[]) || [])])
+    if (includeActivitiesNames.size > 0) {
+      // Build a map of noteId -> names present
+      const acts = await db.activities.where('noteId').anyOf(result.map(n => n.id!)).toArray()
+      const types = await db.activityTypes.toArray()
+      const nameByTypeId = new Map(types.map(t => [t.serverId!, t.name]))
+      const byNote = new Map<number, Set<string>>()
+      for (const a of acts) {
+        if (a.deletedAt) continue
+        const n = nameByTypeId.get(a.typeId)
+        if (!n) continue
+        const set = byNote.get(a.noteId) || new Set<string>()
+        set.add(n)
+        byNote.set(a.noteId, set)
+      }
+      result = result.filter(n => {
+        const set = byNote.get(n.id!) || new Set<string>()
+        for (const name of includeActivitiesNames) if (!set.has(name)) return false
+        return true
+      })
     }
     const quickTags = (quick as any).tags as string[] | undefined
     if (quickTags && quickTags.length > 0) {
@@ -634,14 +679,47 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
     } catch {}
   }
 
-  async function saveEdit(id: number, value: { text: string; tags: string[] }) {
+  async function saveEdit(id: number, value: { text: string; tags: string[]; activities?: any[] }) {
     await updateNoteLocal(id, { text: value.text.trim(), tags: value.tags })
+    // Persist activities edits locally: upsert new/edited and mark removed as deleted
+    if (Array.isArray(value.activities)) {
+      const { createOrUpdateLocalActivity, deleteLocalActivity } = await import('./lib/sync')
+      const existing = await db.activities.where('noteId').equals(id).toArray()
+      const current = existing.filter(a => !a.deletedAt)
+      const nextTypeIds = new Set<number>(value.activities.map(a => a?.typeId).filter((x: any) => typeof x === 'number'))
+      // upsert current values
+      for (const a of value.activities) {
+        if (!a || typeof a.typeId !== 'number') continue
+        try { await createOrUpdateLocalActivity(id, a.typeId, String(a.valueRaw ?? '')) } catch {}
+      }
+      // delete removed
+      for (const a of current) {
+        if (!nextTypeIds.has(a.typeId)) {
+          try { await deleteLocalActivity(id, a.typeId) } catch {}
+        }
+      }
+    }
     window.dispatchEvent(new Event('focuz:local-write'))
     setEditingId(null)
   }
 
-  async function saveEditWithAttachments(id: number, value: { text: string; tags: string[] }, extra?: { attachments?: File[] }) {
+  async function saveEditWithAttachments(id: number, value: { text: string; tags: string[]; activities?: any[] }, extra?: { attachments?: File[] }) {
     await updateNoteLocal(id, { text: value.text.trim(), tags: value.tags })
+    if (Array.isArray(value.activities)) {
+      const { createOrUpdateLocalActivity, deleteLocalActivity } = await import('./lib/sync')
+      const existing = await db.activities.where('noteId').equals(id).toArray()
+      const current = existing.filter(a => !a.deletedAt)
+      const nextTypeIds = new Set<number>(value.activities.map(a => a?.typeId).filter((x: any) => typeof x === 'number'))
+      for (const a of value.activities) {
+        if (!a || typeof a.typeId !== 'number') continue
+        try { await createOrUpdateLocalActivity(id, a.typeId, String(a.valueRaw ?? '')) } catch {}
+      }
+      for (const a of current) {
+        if (!nextTypeIds.has(a.typeId)) {
+          try { await deleteLocalActivity(id, a.typeId) } catch {}
+        }
+      }
+    }
     const files = (extra?.attachments ?? []).slice(0, 10)
     for (const f of files) {
       try { await addLocalAttachment(id, f) } catch {}
@@ -650,9 +728,9 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
     setEditingId(null)
   }
 
-  const [replyValue, setReplyValue] = useState<{ text: string; tags: string[] }>({ text: '', tags: [] })
+  const [replyValue, setReplyValue] = useState<{ text: string; tags: string[]; activities?: any[] }>({ text: '', tags: [] })
 
-  async function addInlineReply(parent: NoteRecord, value: { text: string; tags: string[] }) {
+  async function addInlineReply(parent: NoteRecord, value: { text: string; tags: string[]; activities?: any[] }) {
     const canAdd = value.text.trim().length > 0
     if (!canAdd) return
     const now = new Date().toISOString()
@@ -672,7 +750,14 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
       serverId: null,
       clientId: crypto.randomUUID(),
     }
-    await db.notes.add(payload)
+    const newId = await db.notes.add(payload)
+    if (Array.isArray(value.activities)) {
+      const { createOrUpdateLocalActivity } = await import('./lib/sync')
+      for (const a of value.activities) {
+        if (!a || typeof a.typeId !== 'number') continue
+        try { await createOrUpdateLocalActivity(newId, a.typeId, String(a.valueRaw ?? '')) } catch {}
+      }
+    }
     window.dispatchEvent(new Event('focuz:local-write'))
     setReplyingForId(null)
     setReplyValue({ text: '', tags: [] })
@@ -709,6 +794,7 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
                 showParentPreview={parentId == null && (n.parentId ?? null) != null}
                 hiddenTags={hiddenTagsSet}
                 onTagClick={(tag) => { if (onAddQuickTag) onAddQuickTag(tag) }}
+                onActivityClick={(name) => { if (onAddQuickActivity) onAddQuickActivity(name) }}
                 childrenRight={
                   <>
                     {(repliesById.get(n.id!) || 0) > 0 && (
@@ -753,6 +839,13 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
                     serverId: null,
                     clientId: crypto.randomUUID(),
                   } as NoteRecord)
+                  if (Array.isArray(replyValue.activities)) {
+                    const { createOrUpdateLocalActivity } = await import('./lib/sync')
+                    for (const a of replyValue.activities) {
+                      if (!a || typeof a.typeId !== 'number') continue
+                      try { await createOrUpdateLocalActivity(noteId, a.typeId, String(a.valueRaw ?? '')) } catch {}
+                    }
+                  }
                   const files = (extra?.attachments ?? []).slice(0, 10)
                   for (const f of files) { try { await addLocalAttachment(noteId, f) } catch {} }
                   window.dispatchEvent(new Event('focuz:local-write'))
@@ -932,6 +1025,7 @@ function App() {
       textContains: (currentQuick.text || '').trim() || undefined,
       includeTags: (currentQuick.tags || []).filter(t => !t.startsWith('!')),
       excludeTags: (currentQuick.tags || []).filter(t => t.startsWith('!')).map(t => t.slice(1)),
+      includeActivities: (currentQuick as any).activities || undefined,
       notReply: currentQuick.noParents || undefined,
       sort: currentQuick.sort,
     }
@@ -1093,6 +1187,14 @@ function App() {
               if (tags.includes(tag)) return
               const next = { ...quickFeed, tags: [...tags, tag] }
               setQuickFeed(next)
+              setKV(`quick:space:${currentSpaceId}`, next)
+            }}
+            onAddQuickActivity={(name) => {
+              if (!currentSpaceId) return
+              const acts = (quickFeed as any).activities || []
+              if (acts.includes(name)) return
+              const next = { ...quickFeed, activities: [...acts, name] }
+              setQuickFeed(next as any)
               setKV(`quick:space:${currentSpaceId}`, next)
             }}
           />
