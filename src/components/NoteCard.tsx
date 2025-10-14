@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import type { NoteRecord } from '../lib/types'
 import { db } from '../lib/db'
-import HighlightedText from './HighlightedText'
+// import HighlightedText from './HighlightedText'
+import ParagraphText from './ParagraphText'
 import NoteImages from './NoteImages'
 import { formatExactDateTime, formatRelativeShort, formatDurationShort, parseDurationToMs } from '../lib/time'
 
@@ -28,6 +29,16 @@ export default function NoteCard({
   hiddenTags?: Set<string>
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
+  const menuContainerRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      const target = e.target as Node
+      if (!menuContainerRef.current) return
+      if (!menuContainerRef.current.contains(target)) setMenuOpen(false)
+    }
+    if (menuOpen) document.addEventListener('click', onDocClick)
+    return () => document.removeEventListener('click', onDocClick)
+  }, [menuOpen])
   const parentNote = useLiveQuery(() => showParentPreview && note.parentId ? db.notes.get(note.parentId) : Promise.resolve(undefined), [showParentPreview, note.parentId]) as NoteRecord | undefined
   const activities = useLiveQuery(async () => {
     const list = await db.activities.where('noteId').equals(note.id!).toArray()
@@ -54,14 +65,16 @@ export default function NoteCard({
   return (
     <div className="card-nopad">
       <div className="h-[30px] relative">
-        <div className="absolute right-4 top-0 h-[30px] flex items-center">
+        <div ref={menuContainerRef} className="absolute right-4 top-0 h-[30px] flex items-center">
           {(onEdit || onDelete) && (
-            <button className="px-1 text-neutral-400 hover:text-neutral-100 h-[30px]" onClick={() => setMenuOpen(s => !s)} aria-label="Open menu">⋯</button>
-          )}
-          {menuOpen && (
-            <div className="absolute right-0 mt-1 z-10 rounded border border-neutral-800 bg-neutral-900 shadow-lg">
-              {onEdit && <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpen(false); onEdit() }}>Edit</button>}
-              {onDelete && <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpen(false); onDelete() }}>Delete</button>}
+            <div className="relative">
+              <button className="px-1 text-neutral-400 hover:text-neutral-100 h-[30px]" onClick={() => setMenuOpen(s => !s)} aria-label="Open menu">⋯</button>
+              {menuOpen && (
+                <div className="absolute right-0 top-full mt-1 z-10 rounded border border-neutral-800 bg-neutral-900 shadow-lg">
+                  {onEdit && <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpen(false); onEdit() }}>Edit</button>}
+                  {onDelete && <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpen(false); onDelete() }}>Delete</button>}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -79,7 +92,8 @@ export default function NoteCard({
             </button>
           </div>
         )}
-        <HighlightedText className="block whitespace-pre-wrap leading-6 text-primary" text={note.text} query={''} />
+        {/* Render note text as paragraphs with spacing; keep highlight infra ready if needed later */}
+        <ParagraphText className="text-primary" text={note.text} />
         {activities.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-2">
             {activities.map((a, i) => (

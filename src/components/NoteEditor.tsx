@@ -65,6 +65,16 @@ export default function NoteEditor({
     if (expanded) textRef.current?.focus()
   }, [expanded])
 
+  function autoResize(target: HTMLTextAreaElement | null) {
+    if (!target) return
+    target.style.height = 'auto'
+    target.style.height = `${target.scrollHeight}px`
+  }
+
+  useEffect(() => {
+    autoResize(textRef.current)
+  }, [value.text, expanded])
+
   // Prefill activities for edit mode from DB if not provided (deduplicated per typeId)
   const existingActivities = (useLiveQuery(async () => {
     if (!noteId || mode !== 'edit') return [] as Array<{ typeId: number; valueRaw: string }>
@@ -121,10 +131,11 @@ export default function NoteEditor({
     <div className={containerClass}>
       <textarea
         ref={textRef}
-        className="input min-h-24 text-primary"
+        className="input min-h-24 text-primary resize-none overflow-hidden"
         placeholder={mode === 'reply' ? 'Reply…' : 'Add note…'}
         value={value.text}
         onChange={e => onChange({ ...value, text: e.target.value })}
+        onInput={e => autoResize(e.currentTarget)}
       />
       <ActivitiesInput
         value={activities}
