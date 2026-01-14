@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '../lib/db'
+import { tags as tagsRepo } from '../data'
 
 export default function TagsInput({ value, onChange, placeholder, className, spaceId, invertible = false }: { value: string[]; onChange: (tags: string[]) => void; placeholder?: string; className?: string; spaceId?: number; invertible?: boolean }) {
   const MAX_LEN = 20
   const [draft, setDraft] = useState<string>('')
-  const [queryKey, setQueryKey] = useState<string>('')
   const [focused, setFocused] = useState<boolean>(false)
   const [selectedIdx, setSelectedIdx] = useState<number>(-1)
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [menuRect, setMenuRect] = useState<{ left: number; top: number; width: number } | null>(null)
 
   useEffect(() => {
     // Keep draft trimmed of delimiter-only strings
@@ -85,7 +87,7 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
   }
 
   function pushTag(tagText: string) {
-    let token = tagText.trim()
+    const token = tagText.trim()
     if (!token) return
     // Handle invertible '!' prefix and validate base
     const hasBang = invertible && token.startsWith('!')
@@ -96,7 +98,6 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
     const next = Array.from(new Set([...value, final]))
     onChange(next)
     setDraft('')
-    setQueryKey('')
     setSelectedIdx(-1)
   }
 
@@ -172,55 +173,43 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
   // Build last-used map from recent notes and compute suggestions from tags directory
   const suggestions = useLiveQuery(async () => {
     if (!spaceId) return [] as string[]
-    // Exclude already selected tags (ignore invert flag when invertible)
-    const selected = new Set(
-      value.map(v => (invertible ? normalizeBase(v) : v).toLowerCase())
-    )
-    const rawQ = queryKey.trim()
-    const baseQ = invertible && rawQ.startsWith('!') ? rawQ.slice(1) : rawQ
-    const q = baseQ.toLowerCase()
-
-    // Build last used map from recent notes for ordering
-    const lastUsed = new Map<string, string>() // tagLower -> ISO modifiedAt
-    const recentNotes = await db.notes.orderBy('modifiedAt').reverse().limit(500).toArray()
-    for (const n of recentNotes) {
-      if (n.spaceId !== spaceId || n.deletedAt) continue
-      for (const t of (n.tags || [])) {
-        const low = (t || '').toLowerCase()
-        const prev = lastUsed.get(low)
-        if (!prev || n.modifiedAt > prev) lastUsed.set(low, n.modifiedAt)
-      }
-    }
-
-    let candidates: string[] = []
-    if (q) {
-      const all = await db.tags.where('spaceId').equals(spaceId).filter(t => !t.deletedAt && (t.name || '').toLowerCase().startsWith(q)).toArray()
-      candidates = all.map(t => t.name).filter(Boolean) as string[]
-    } else {
-      // derive from notes used tags
-      candidates = Array.from(new Set(Array.from(lastUsed.keys())))
-    }
-    // unique, exclude selected
-    const unique: string[] = []
-    for (const name of candidates) {
-      const low = name.toLowerCase()
-      if (!selected.has(low) && !unique.some(x => x.toLowerCase() === low)) unique.push(name)
-    }
-    // sort by last used desc, fallback alpha
-    unique.sort((a, b) => {
-      const ya = lastUsed.get(a.toLowerCase()) || ''
-      const yb = lastUsed.get(b.toLowerCase()) || ''
-      if (ya !== yb) return ya > yb ? -1 : 1
-      return a.localeCompare(b)
+    return tagsRepo.suggest({
+      spaceId,
+      selected: value,
+      query: draft,
+      invertible,
+      limit: 10,
     })
-    return unique.slice(0, 10)
-  }, [spaceId, queryKey, JSON.stringify(value)]) || []
+  }, [spaceId, draft, invertible, JSON.stringify(value)]) || []
+
+  const menuOpen = focused && !!spaceId && suggestions.length > 0
+
+  useEffect(() => {
+    if (!menuOpen) { setMenuRect(null); return }
+    if (typeof window === 'undefined') return
+
+    const update = () => {
+      const el = containerRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      setMenuRect({ left: r.left, top: r.bottom + 8, width: r.width })
+    }
+
+    update()
+    window.addEventListener('resize', update)
+    // capture scroll from nested scroll containers too (Quick filters panel has overflow-y-auto)
+    window.addEventListener('scroll', update, true)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+    }
+  }, [menuOpen, suggestions.length])
 
   return (
-    <div className="w-full relative">
+    <div className="w-full relative" ref={containerRef}>
       <div className={containerClasses} onClick={() => inputRef.current?.focus()}>
         {value.map((tag, idx) => (
-          <span key={`${tag}-${idx}`} className="inline-flex items-center gap-1 rounded-full bg-neutral-800 px-2 py-1 text-xs text-secondary">
+          <span key={`${tag}-${idx}`} className="pill pill-accent pill-tag gap-2">
             {invertible ? (
               <button
                 type="button"
@@ -236,7 +225,7 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
             )}
             <button
               type="button"
-              className="text-neutral-400 hover:text-neutral-200"
+              className="text-secondary hover:text-primary"
               onClick={(e) => { e.preventDefault(); e.stopPropagation(); removeTag(idx) }}
               aria-label="Remove tag"
               title="Remove"
@@ -251,8 +240,6 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
           onChange={e => {
             const sanitized = sanitizeDraftInput(e.target.value)
             setDraft(sanitized)
-            const qRaw = invertible && sanitized.startsWith('!') ? sanitized.slice(1) : sanitized
-            setQueryKey(qRaw)
             setSelectedIdx(-1)
           }}
           onKeyDown={handleKeyDown}
@@ -260,20 +247,26 @@ export default function TagsInput({ value, onChange, placeholder, className, spa
           onBlur={handleBlur}
         />
       </div>
-      {focused && !!spaceId && suggestions.length > 0 && (
-        <div className="absolute left-0 top-full mt-1 z-50 w-full max-h-60 overflow-auto rounded border border-neutral-800 bg-neutral-900 py-1">
-          {suggestions.map((s, i) => (
-            <button
-              key={`${s}-${i}`}
-              type="button"
-              className={`block w-full text-left px-3 py-2 text-sm ${i === selectedIdx ? 'bg-neutral-800 text-neutral-100' : 'text-secondary hover:bg-neutral-800'}`}
-              onMouseDown={e => e.preventDefault()}
-              onClick={() => { const final = invertible && draft.trim().startsWith('!') ? ('!' + s) : s; pushTag(final) }}
-            >
-              {s}
-            </button>
-          ))}
-        </div>
+      {menuOpen && menuRect && createPortal(
+        <div
+          className="dropdown-menu z-[200]"
+          style={{ position: 'fixed', left: menuRect.left, top: menuRect.top, width: menuRect.width }}
+        >
+          <div className="max-h-60 overflow-auto">
+            {suggestions.map((s, i) => (
+              <button
+                key={`${s}-${i}`}
+                type="button"
+                className={`dropdown-item ${i === selectedIdx ? 'text-primary' : ''}`}
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => { const final = invertible && draft.trim().startsWith('!') ? ('!' + s) : s; pushTag(final) }}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

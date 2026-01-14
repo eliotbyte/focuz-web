@@ -2,6 +2,7 @@ import Dexie, { type Table } from 'dexie'
 import type {
   MetaKV,
   NoteRecord,
+  NoteConflictRecord,
   SpaceRecord,
   TagRecord,
   FilterRecord,
@@ -15,6 +16,7 @@ import type {
 class AppDatabase extends Dexie {
   spaces!: Table<SpaceRecord, number>
   notes!: Table<NoteRecord, number>
+  noteConflicts!: Table<NoteConflictRecord, number>
   tags!: Table<TagRecord, number>
   filters!: Table<FilterRecord, number>
   activities!: Table<ActivityRecord, number>
@@ -89,6 +91,40 @@ class AppDatabase extends Dexie {
         })
       } catch {}
     })
+    // Add noteConflicts to persist local snapshots on sync conflicts.
+    this.version(7).stores({
+      spaces: '++id, serverId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      notes: '++id, serverId, clientId, spaceId, parentId, date, createdAt, modifiedAt, deletedAt, isDirty',
+      noteConflicts: '++id, noteLocalId, noteServerId, isResolved, createdAt',
+      tags: '++id, serverId, spaceId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      filters: '++id, serverId, clientId, spaceId, parentId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      activities: '++id, serverId, noteId, typeId, createdAt, modifiedAt, deletedAt, isDirty',
+      activityTypes: '++id, serverId, spaceId, name, valueType, createdAt, modifiedAt, deletedAt',
+      charts: '++id, serverId, noteId, createdAt, modifiedAt, deletedAt, isDirty',
+      meta: 'key',
+      attachments: '++id, serverId, noteId, fileName, createdAt, modifiedAt, deletedAt, isDirty',
+      jobs: '++id, kind, attachmentId, priority, status, attempts, createdAt, updatedAt',
+    })
+    // Add clientId to attachments for idempotent upload keys.
+    this.version(8).stores({
+      spaces: '++id, serverId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      notes: '++id, serverId, clientId, spaceId, parentId, date, createdAt, modifiedAt, deletedAt, isDirty',
+      noteConflicts: '++id, noteLocalId, noteServerId, isResolved, createdAt',
+      tags: '++id, serverId, spaceId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      filters: '++id, serverId, clientId, spaceId, parentId, name, createdAt, modifiedAt, deletedAt, isDirty',
+      activities: '++id, serverId, noteId, typeId, createdAt, modifiedAt, deletedAt, isDirty',
+      activityTypes: '++id, serverId, spaceId, name, valueType, createdAt, modifiedAt, deletedAt',
+      charts: '++id, serverId, noteId, createdAt, modifiedAt, deletedAt, isDirty',
+      meta: 'key',
+      attachments: '++id, serverId, clientId, noteId, fileName, createdAt, modifiedAt, deletedAt, isDirty',
+      jobs: '++id, kind, attachmentId, priority, status, attempts, createdAt, updatedAt',
+    }).upgrade(tx => {
+      try {
+        return (tx.table('attachments') as any).toCollection().modify((a: any) => {
+          if (typeof a.clientId !== 'string') a.clientId = null
+        })
+      } catch {}
+    })
     // Ensure the connection closes on external version changes (e.g., deleteDatabase in another tab)
     try { this.on('versionchange', () => { try { this.close() } catch {} }) } catch {}
   }
@@ -111,10 +147,11 @@ export async function setKV(key: string, value: unknown): Promise<void> {
 }
 
 export async function wipeLocalData(): Promise<void> {
-  await db.transaction('rw', [db.spaces, db.notes, db.tags, db.filters, db.activities, db.charts, db.meta, db.attachments, db.jobs], async () => {
+  await db.transaction('rw', [db.spaces, db.notes, db.noteConflicts, db.tags, db.filters, db.activities, db.charts, db.meta, db.attachments, db.jobs], async () => {
     await Promise.all([
       db.spaces.clear(),
       db.notes.clear(),
+      db.noteConflicts.clear(),
       db.tags.clear(),
       db.filters.clear(),
       db.activities.clear(),

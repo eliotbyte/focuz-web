@@ -1,58 +1,96 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { db, setKV, getKV } from './lib/db'
 import type { NoteRecord, FilterRecord, SpaceRecord } from './lib/types'
-import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote, onAuthRequired, isAuthRequired, getLastUsername, addLocalAttachment, teardownSync, purgeAndLogout } from './lib/sync'
+import { ensureDefaultSpace, getCurrentSpaceId, runSync, scheduleAutoSync, login, register, isAuthenticated, logout, deleteNote, getLastUsername, addLocalAttachment, teardownSync, purgeAndLogout } from './lib/sync'
 import { updateNoteLocal, createFilterLocal, updateFilterLocal } from './lib/sync'
 import { searchNotes, ensureNoteIndexForSpace, initSearch } from './lib/search'
-import Toasts from './components/Toasts'
+import { activityTypes as activityTypesRepo, activities as activitiesRepo, filters as filtersRepo, kv, notes as notesRepo, spaces as spacesRepo } from './data'
+import { initAppState, useAppState } from './lib/app-state'
+import { featureFlags } from './lib/feature-flags'
+import { Dialog, DialogContent, DialogTitle } from './components/ui/dialog'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './components/ui/dropdown-menu'
+import { SystemStatusInline, SystemStatusLayer } from './components/SystemStatus'
+import { notifyUndoable } from './ui/notify'
+import { AppToaster } from './ui/toaster'
 import NoteEditor, { type NoteEditorValue } from './components/NoteEditor'
 import NoteCard from './components/NoteCard'
 import TagsInput from './components/TagsInput'
 import ActivitiesPicker from './components/ActivitiesPicker'
+import { applyStoredTheme, setStoredTheme } from './lib/theme'
+import FilterAltRoundedIcon from '@mui/icons-material/FilterAltRounded'
+import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded'
+import LogoutRoundedIcon from '@mui/icons-material/LogoutRounded'
+import MenuRoundedIcon from '@mui/icons-material/MenuRounded'
+import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded'
+import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded'
+import VisibilityOffRoundedIcon from '@mui/icons-material/VisibilityOffRounded'
 
-function TopBar({ onOpenSpaces, onOpenSettings, onLogout, isThread, onBack }: { onOpenSpaces: () => void; onOpenSettings: () => void; onLogout: () => void; isThread?: boolean; onBack?: () => void }) {
+function TopBar({
+  onOpenSpaces,
+  onOpenSettings,
+  onLogout,
+  isThread,
+  onBack,
+}: {
+  onOpenSpaces: () => void
+  onOpenSettings: () => void
+  onLogout: () => void
+  isThread?: boolean
+  onBack?: () => void
+}) {
   return (
-    <header className="flex items-center justify-between py-2">
-      <div className="flex items-center gap-2">
+    <div className="grid grid-cols-1 md:grid-cols-[340px_minmax(0,1fr)] lg:grid-cols-[340px_minmax(0,1fr)_340px] gap-[40px] items-center">
+      <div className="flex items-center gap-3">
         {isThread ? (
-          <button className="button" onClick={onBack}>←</button>
+          <button className="icon-btn icon-35" onClick={onBack} type="button" aria-label="Back">
+            <ArrowBackRoundedIcon fontSize="inherit" />
+          </button>
         ) : (
-          <button className="button" onClick={onOpenSpaces}>☰</button>
+          <button className="icon-btn icon-35" onClick={onOpenSpaces} type="button" aria-label="Open spaces">
+            <MenuRoundedIcon fontSize="inherit" />
+          </button>
         )}
-        <h1 className="text-xl font-semibold">focuz</h1>
+        <h1 className="text-title text-primary">focuz</h1>
       </div>
-      <div className="flex items-center gap-2">
-        <button className="button" onClick={onOpenSettings}>⚙️</button>
-        <button className="button" onClick={onLogout}>Logout</button>
+      <div className="hidden md:block" />
+      <div className="flex items-center justify-end gap-9">
+        <SystemStatusInline />
+        <button className="icon-btn icon-35" onClick={onOpenSettings} type="button" aria-label="Settings">
+          <SettingsRoundedIcon fontSize="inherit" />
+        </button>
+        <button className="icon-btn icon-35" onClick={onLogout} type="button" aria-label="Logout">
+          <LogoutRoundedIcon fontSize="inherit" />
+        </button>
       </div>
-    </header>
+    </div>
   )
 }
 
-function Settings({ onClose }: { onClose: () => void }) {
+function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [theme, setTheme] = useState<string>(() => document.documentElement.dataset.theme || 'dark')
   function save() {
-    document.documentElement.dataset.theme = theme
-    onClose()
+    setStoredTheme(theme === 'light' ? 'light' : 'dark')
+    onOpenChange(false)
   }
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50">
-      <div className="w-full sm:max-w-md bg-neutral-900 border border-neutral-800 rounded-t-xl sm:rounded-xl p-4 space-y-3">
-        <h2 className="text-lg font-medium">Settings</h2>
-        <div className="space-y-2">
-          <label className="text-sm text-neutral-400">Theme</label>
-          <select className="input" value={theme} onChange={e => setTheme(e.target.value)}>
-            <option value="dark">Dark</option>
-            <option value="light">Light</option>
-          </select>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="overflow-hidden">
+        <div className="space-y-5">
+          <DialogTitle>Settings</DialogTitle>
+          <div className="flex items-center justify-between gap-6">
+            <label className="text-secondary">Theme</label>
+            <select className="input w-[220px]" value={theme} onChange={e => setTheme(e.target.value)}>
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </div>
+          <div className="flex justify-end gap-3">
+            <button className="button" onClick={() => onOpenChange(false)}>Cancel</button>
+            <button className="button" onClick={save}>Save</button>
+          </div>
         </div>
-        <div className="flex justify-end gap-2">
-          <button className="button" onClick={onClose}>Cancel</button>
-          <button className="button" onClick={save}>Save</button>
-        </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -63,13 +101,41 @@ function AuthScreen({ onDone }: { onDone: () => void }) {
   const [password2, setPassword2] = useState('')
   const [show, setShow] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [loginError, setLoginError] = useState<string | null>(null)
+  const [registerError, setRegisterError] = useState<string | null>(null)
+
+  const passwordRules = useMemo(() => {
+    const p = password || ''
+    return {
+      minLen: p.length >= 8,
+      hasLower: /[a-z]/.test(p),
+      hasUpper: /[A-Z]/.test(p),
+      hasDigit: /[0-9]/.test(p),
+      noSpaces: !/\s/.test(p),
+    }
+  }, [password])
+
+  const isPasswordValid = useMemo(() => {
+    const r = passwordRules
+    return r.minLen && r.hasLower && r.hasUpper && r.hasDigit && r.noSpaces
+  }, [passwordRules])
+
+  const confirmTouched = password2.length > 0
+  const passwordsMatch = password2.length > 0 && password2 === password
+
+  // Prevent error leakage between modes.
+  useEffect(() => {
+    if (mode === 'login') setRegisterError(null)
+    else setLoginError(null)
+  }, [mode])
 
   async function submit() {
     setLoading(true)
-    setError(null)
+    if (mode === 'register') setRegisterError(null)
+    else setLoginError(null)
     try {
       if (mode === 'register') {
+        if (!isPasswordValid) throw new Error('Password does not meet requirements')
         if (password !== password2) throw new Error('Passwords do not match')
         await register(username.trim(), password)
       }
@@ -78,34 +144,116 @@ function AuthScreen({ onDone }: { onDone: () => void }) {
       await runSync()
       onDone()
     } catch (e: any) {
-      setError(e?.message || 'Auth failed')
+      const raw = String(e?.message || '')
+      if (mode === 'register') {
+        if (raw.startsWith('409')) setRegisterError('User already exists')
+        else if (raw === 'Password does not meet requirements') setRegisterError('Password does not meet requirements')
+        else if (raw === 'Passwords do not match') setRegisterError('Passwords do not match')
+        else setRegisterError(raw || 'Registration failed')
+      } else {
+        setLoginError(raw || 'Sign in failed')
+      }
     } finally {
       setLoading(false)
     }
   }
 
-  const canSubmit = username.trim().length >= 3 && password.length >= 8 && (mode === 'login' || password === password2)
+  const canSubmit =
+    username.trim().length >= 3 &&
+    password.length >= 8 &&
+    (mode === 'login' || (isPasswordValid && password === password2))
 
   return (
     <div className="min-h-dvh flex items-center justify-center p-4">
       <div className="w-full max-w-sm card space-y-4">
-        <h2 className="text-lg font-medium">{mode === 'register' ? 'Create account' : 'Sign in'}</h2>
-        <input className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} />
+        <h2 className="text-title text-primary">{mode === 'register' ? 'Create account' : 'Sign in'}</h2>
+        <input
+          className="input"
+          placeholder="Username"
+          value={username}
+          onChange={e => {
+            setUsername(e.target.value)
+            if (mode === 'register') setRegisterError(null)
+            else setLoginError(null)
+          }}
+        />
         <div className="space-y-2">
-          <div className="flex gap-2">
-            <input className="input" placeholder="Password" type={show ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} />
-            <button className="button" onClick={() => setShow(s => !s)} type="button">{show ? 'Hide' : 'Show'}</button>
+          <div className="input-wrap">
+            <input
+              className="input"
+              placeholder="Password"
+              type={show ? 'text' : 'password'}
+              value={password}
+              onChange={e => {
+                setPassword(e.target.value)
+                if (mode === 'register') setRegisterError(null)
+                else setLoginError(null)
+              }}
+            />
+            <button className="icon-btn icon-35 input-icon-btn" onClick={() => setShow(s => !s)} type="button" aria-label={show ? 'Hide password' : 'Show password'}>
+              {show ? <VisibilityOffRoundedIcon fontSize="inherit" /> : <VisibilityRoundedIcon fontSize="inherit" />}
+            </button>
           </div>
+          {mode === 'register' && password.length > 0 && (() => {
+            const unmet = [
+              !passwordRules.minLen ? 'at least 8 characters' : null,
+              !passwordRules.hasLower ? 'at least one lowercase letter' : null,
+              !passwordRules.hasUpper ? 'at least one uppercase letter' : null,
+              !passwordRules.hasDigit ? 'at least one digit' : null,
+              !passwordRules.noSpaces ? 'no spaces' : null,
+            ].filter(Boolean) as string[]
+            if (unmet.length === 0) return null
+            return (
+              <div className="text-secondary text-sm space-y-1">
+                <div>Password rules:</div>
+                {unmet.map((t) => (
+                  <div key={t} className="text-red-400">- {t}</div>
+                ))}
+              </div>
+            )
+          })()}
           {mode === 'register' && (
-            <input className="input" placeholder="Confirm password" type={show ? 'text' : 'password'} value={password2} onChange={e => setPassword2(e.target.value)} />
+            <div className="space-y-1">
+              <div className="input-wrap">
+                <input
+                  className="input"
+                  placeholder="Confirm password"
+                  type={show ? 'text' : 'password'}
+                  value={password2}
+                  onChange={e => {
+                    setPassword2(e.target.value)
+                    setRegisterError(null)
+                  }}
+                />
+              <button className="icon-btn icon-35 input-icon-btn" onClick={() => setShow(s => !s)} type="button" aria-label={show ? 'Hide password' : 'Show password'}>
+                {show ? <VisibilityOffRoundedIcon fontSize="inherit" /> : <VisibilityRoundedIcon fontSize="inherit" />}
+              </button>
+            </div>
+              {confirmTouched && (
+                passwordsMatch
+                  ? <div className="text-secondary text-sm">Passwords match</div>
+                  : <div className="text-red-400 text-sm">Passwords do not match</div>
+              )}
+            </div>
           )}
         </div>
-        {error && <div className="text-sm text-red-400">{error}</div>}
-        <div className="flex justify-between items-center">
-          <button className="button" onClick={() => setMode(mode === 'register' ? 'login' : 'register')} type="button">
-            {mode === 'register' ? 'Have an account? Sign in' : "No account? Create new"}
+        {mode === 'login' && loginError && <div className="text-sm text-red-400">{loginError}</div>}
+        {mode === 'register' && registerError && <div className="text-sm text-red-400">{registerError}</div>}
+        <div className="space-y-2">
+          <button className="button w-full justify-center" onClick={submit} disabled={!canSubmit || loading}>
+            {loading ? '...' : (mode === 'register' ? 'Register' : 'Sign in')}
           </button>
-          <button className="button" onClick={submit} disabled={!canSubmit || loading}>{loading ? '...' : (mode === 'register' ? 'Register & Sign in' : 'Sign in')}</button>
+          {mode === 'login' ? (
+            <div className="text-secondary text-sm">
+              <span>No account? </span>
+              <button className="link" type="button" onClick={() => setMode('register')}>Create new</button>
+            </div>
+          ) : (
+            <div className="text-secondary text-sm">
+              <span>Have an account? </span>
+              <button className="link" type="button" onClick={() => setMode('login')}>Sign in</button>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -113,34 +261,64 @@ function AuthScreen({ onDone }: { onDone: () => void }) {
 }
 
 function SpaceDrawer({ open, onClose, currentId, onSelected }: { open: boolean; onClose: () => void; currentId?: number | null; onSelected?: (id: number) => void }) {
-  const spaces = useLiveQuery(() => db.spaces.orderBy('createdAt').toArray(), []) ?? []
+  const spaces = useLiveQuery(() => spacesRepo.listAll(), []) ?? []
   async function selectSpace(id: number) {
-    await setKV('currentSpaceId', id)
+    await kv.set('currentSpaceId', id)
     await runSync()
     if (onSelected) onSelected(id)
     else onClose()
   }
   return (
-    <div className={`fixed inset-0 z-40 transition ${open ? '' : 'pointer-events-none'}`}>
+    <div className={`fixed inset-0 z-[80] transition ${open ? '' : 'pointer-events-none'}`}>
       <div className={`absolute inset-0 bg-black/60 ${open ? 'opacity-100' : 'opacity-0'}`} onClick={onClose} />
-      <aside className={`absolute left-0 top-0 h-full w-72 bg-neutral-900 border-r border-neutral-800 p-4 ${open ? '' : '-translate-x-full'} transition-transform`}>
-        <h2 className="text-lg font-medium mb-3">Spaces</h2>
-        <ul className="space-y-2">
-          {spaces.map((s: SpaceRecord) => (
-            <li key={s.id}>
-              <button className={`w-full text-left input ${currentId === s.id ? 'border-sky-500' : ''}`} onClick={() => selectSpace(s.id!)}>
-                {s.name}
-              </button>
-            </li>
-          ))}
-        </ul>
+      <aside
+        className={`absolute left-0 top-0 h-full w-72 ${open ? '' : '-translate-x-full'} transition-transform`}
+        style={{
+          background: 'rgb(var(--c-surface))',
+          boxShadow: 'var(--shadow-surface)',
+          borderTopRightRadius: '15px',
+          borderBottomRightRadius: '15px',
+        }}
+      >
+        <div className="p-[25px]">
+          <h2 className="text-title text-muted mb-4">Spaces</h2>
+          <ul className="space-y-3">
+            {spaces.map((s: SpaceRecord) => (
+              <li key={s.id}>
+                <button
+                  type="button"
+                  className={[
+                    'w-full text-left px-3 py-3 rounded-[15px] transition-colors',
+                    (currentId === s.id ? 'text-primary' : 'text-secondary hover:text-primary'),
+                  ].join(' ')}
+                  style={currentId === s.id ? { background: 'rgba(var(--c-text) / 0.03)' } : undefined}
+                  onClick={() => selectSpace(s.id!)}
+                >
+                  <span className="truncate">{s.name}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       </aside>
     </div>
   )
 }
 
-function FiltersList({ spaceId, selectedId, onSelect }: { spaceId: number; selectedId?: number | null; onSelect: (f: FilterRecord | null) => void }) {
-  const filters = useLiveQuery(() => db.filters.where('spaceId').equals(spaceId).filter(f => !f.deletedAt).toArray(), [spaceId]) ?? []
+function FiltersList({
+  spaceId,
+  selectedId,
+  isNoFiltersActive,
+  onSelect,
+  onClearAll,
+}: {
+  spaceId: number
+  selectedId?: number | null
+  isNoFiltersActive: boolean
+  onSelect: (f: FilterRecord | null) => void
+  onClearAll: () => void
+}) {
+  const filters = useLiveQuery(() => filtersRepo.listActiveBySpace(spaceId), [spaceId]) ?? []
   const [collapsed, setCollapsed] = useState<Record<number, boolean>>({})
   const [manage, setManage] = useState(false)
   const [dragId, setDragId] = useState<number | null>(null)
@@ -237,14 +415,8 @@ function FiltersList({ spaceId, selectedId, onSelect }: { spaceId: number; selec
       for (const ch of n.children) collect(ch.id)
     }
     collect(localId)
-    const now = new Date().toISOString()
-    await db.transaction('rw', db.filters, async () => {
-      for (const id of ids) await db.filters.update(id, { deletedAt: now, modifiedAt: now, isDirty: 1 })
-    })
-    try {
-      const { addToast } = await import('./lib/toast')
-      addToast({ message: 'Filters deleted', action: { type: 'undo-delete-filters-bulk', label: 'Undo', payload: { filterIds: ids } } })
-    } catch {}
+    await filtersRepo.softDeleteMany(ids)
+    notifyUndoable('Filters deleted', { label: 'Undo', onClick: () => filtersRepo.restoreDeletedMany(ids) })
     if (selectedId && ids.includes(selectedId)) onSelect(null)
   }
 
@@ -303,14 +475,31 @@ function FiltersList({ spaceId, selectedId, onSelect }: { spaceId: number; selec
       updates.push({ id: n.id, params: p })
     }
     const now = new Date().toISOString()
-    await db.transaction('rw', db.filters, async () => {
-      // update parent for dragged
-      if (newParentServerId != null) await db.filters.update(dragLocalId, { parentId: newParentServerId, isDirty: 1, modifiedAt: now, params: { ...(drag.rec.params as any), _parentClientId: undefined } as any })
-      else await db.filters.update(dragLocalId, { parentId: null, isDirty: 1, modifiedAt: now, params: { ...(drag.rec.params as any), _parentClientId: newParentClientId || undefined } as any })
-      // update orders
-      for (const u of updates) await db.filters.update(u.id, { params: u.params as any, isDirty: 1, modifiedAt: now })
-    })
-    try { window.dispatchEvent(new Event('focuz:local-write')) } catch {}
+    const bulk: Array<{ id: number; changes: Partial<Pick<FilterRecord, 'parentId' | 'params' | 'modifiedAt' | 'isDirty'>> }> =
+      updates.map(u => ({ id: u.id, changes: { params: u.params as any, isDirty: 1 as const, modifiedAt: now } }))
+    // update parent for dragged + ensure _parentClientId matches new parent mode
+    const dragUpdate = bulk.find(x => x.id === dragLocalId)
+    const dragParams = { ...(drag.rec.params as any), ...(dragUpdate?.changes?.params as any), _parentClientId: (newParentServerId != null ? undefined : (newParentClientId || undefined)) }
+    if (dragUpdate) {
+      dragUpdate.changes = {
+        ...dragUpdate.changes,
+        parentId: (newParentServerId != null ? newParentServerId : null),
+        params: dragParams as any,
+        isDirty: 1 as const,
+        modifiedAt: now,
+      }
+    } else {
+      bulk.push({
+        id: dragLocalId,
+        changes: {
+          parentId: (newParentServerId != null ? newParentServerId : null),
+          params: dragParams as any,
+          isDirty: 1 as const,
+          modifiedAt: now,
+        },
+      })
+    }
+    await filtersRepo.bulkUpdate(bulk)
   }
 
   function onDragStart(e: React.DragEvent, id: number) {
@@ -337,15 +526,22 @@ function FiltersList({ spaceId, selectedId, onSelect }: { spaceId: number; selec
   }
 
   return (
-    <aside className="hidden md:block w-64 shrink-0">
-      <div className="card" ref={ref}>
+    <div className="min-w-0" ref={ref}>
+      <div className="card h-full flex flex-col">
         <div className="mb-2 font-medium flex items-center justify-between">
-          <span>Filters</span>
-          <button className={`text-xs ${manage ? 'text-sky-400' : 'text-neutral-400 hover:text-neutral-200'}`} onClick={() => setManage(m => !m)}>Manage</button>
+          <span className="inline-flex items-center gap-2 text-title text-muted">
+            <FilterAltRoundedIcon fontSize="inherit" className="icon-35 text-secondary" />
+            <span>Filters</span>
+          </span>
+          <button className={manage ? 'text-primary' : 'text-secondary hover:text-primary'} onClick={() => setManage(m => !m)}>Manage</button>
         </div>
-        <ul className="space-y-1">
+        <ul className="space-y-1 overflow-y-auto min-h-0 pr-1">
           <li>
-            <div className={`relative flex items-center justify-between px-2 py-1 text-sm cursor-pointer ${(!selectedId ? 'text-neutral-100' : 'text-neutral-300')}`} onClick={() => onSelect(null)}>
+            <div
+              className={`relative flex items-center justify-between px-3 py-3 cursor-pointer rounded-[15px] ${(isNoFiltersActive ? 'text-primary' : 'text-secondary hover:text-primary')}`}
+              style={isNoFiltersActive ? { background: 'rgba(var(--c-text) / 0.03)' } : undefined}
+              onClick={onClearAll}
+            >
               <span className="truncate">No filters</span>
             </div>
           </li>
@@ -358,15 +554,19 @@ function FiltersList({ spaceId, selectedId, onSelect }: { spaceId: number; selec
                 onDragLeave={onDragLeave}
                 onDrop={(e) => onDrop(e, node.id)}
               >
-                <div className={`relative flex items-center justify-between px-2 py-1 text-sm cursor-pointer ${selectedId === node.id ? 'bg-neutral-800 text-neutral-100 rounded' : 'text-neutral-300 hover:text-neutral-100'}`}
+                <div
+                  className={`relative flex items-center justify-between px-3 py-3 cursor-pointer rounded-[15px] ${selectedId === node.id ? 'text-primary' : 'text-secondary hover:text-primary'}`}
                   onClick={() => onSelect(node.rec)}
-                  style={{ paddingLeft: `${8 + node.depth * 14 + (node.children.length > 0 ? 14 : 0)}px` }}
+                  style={{
+                    paddingLeft: `${12 + node.depth * 14 + (node.children.length > 0 ? 14 : 0)}px`,
+                    ...(selectedId === node.id ? { background: 'rgba(var(--c-text) / 0.03)' } : {}),
+                  }}
                 >
                   {/* collapse/expand icon positioned without affecting indent */}
                   {node.children.length > 0 && (
                     <button
-                      className="absolute text-neutral-500 hover:text-neutral-200"
-                      style={{ left: `${8 + node.depth * 14}px` }}
+                      className="absolute text-secondary hover:text-primary"
+                      style={{ left: `${12 + node.depth * 14}px` }}
                       onClick={(e) => { e.stopPropagation(); toggleCollapse(node.id) }}
                       title={collapsed[node.id] ? 'Expand' : 'Collapse'}
                     >
@@ -375,7 +575,7 @@ function FiltersList({ spaceId, selectedId, onSelect }: { spaceId: number; selec
                   )}
                   <span className="truncate">{node.rec.name}</span>
                   {manage && (
-                    <button className="px-1 text-neutral-500 hover:text-neutral-200" title="Delete filter" onClick={(e) => { e.stopPropagation(); deleteWithChildren(node.id) }}>×</button>
+                    <button className="px-1 text-secondary hover:text-primary" title="Delete filter" onClick={(e) => { e.stopPropagation(); deleteWithChildren(node.id) }}>×</button>
                   )}
                 </div>
                 {dropOver && dropOver.id === node.id && (
@@ -390,11 +590,20 @@ function FiltersList({ spaceId, selectedId, onSelect }: { spaceId: number; selec
           ))}
         </ul>
       </div>
-    </aside>
+    </div>
   )
 }
 
 type SortField = 'date' | 'createdat' | 'modifiedat'
+
+function hasActiveQuickFilters(quick: any) {
+  const q = quick || {}
+  const text = String(q.text || '').trim()
+  const tags = Array.isArray(q.tags) ? q.tags : []
+  const activities = featureFlags.quickFiltersActivities && Array.isArray(q.activities) ? q.activities : []
+  const noParents = !!q.noParents
+  return !!text || tags.length > 0 || activities.length > 0 || noParents
+}
 
 function QuickFiltersPanel({
   value,
@@ -409,7 +618,7 @@ function QuickFiltersPanel({
 }) {
   const [text, setText] = useState(value.text)
   const [tags, setTags] = useState<string[]>(Array.isArray((value as any).tags) ? (value as any).tags : [])
-  const [activities, setActivities] = useState<string[]>(Array.isArray((value as any).activities) ? (value as any).activities : [])
+  const [activities, setActivities] = useState<string[]>(featureFlags.quickFiltersActivities && Array.isArray((value as any).activities) ? (value as any).activities : [])
   const [noParents, setNoParents] = useState(value.noParents)
   const [sortField, setSortField] = useState<SortField>(value.sort.split(',')[0] as SortField)
   const [sortDir, setSortDir] = useState<'ASC' | 'DESC'>(value.sort.split(',')[1] as 'ASC' | 'DESC')
@@ -417,56 +626,92 @@ function QuickFiltersPanel({
   useEffect(() => {
     setText(value.text)
     setTags(Array.isArray((value as any).tags) ? (value as any).tags : [])
-    setActivities(Array.isArray((value as any).activities) ? (value as any).activities : [])
+    setActivities(featureFlags.quickFiltersActivities && Array.isArray((value as any).activities) ? (value as any).activities : [])
     setNoParents(value.noParents)
     setSortField(value.sort.split(',')[0] as SortField)
     setSortDir(value.sort.split(',')[1] as 'ASC' | 'DESC')
   }, [value])
 
   return (
-    <aside className="hidden lg:block w-64 shrink-0">
-      <div className="card space-y-3">
-        <div className="mb-1 font-medium">Quick filters</div>
-        <input className="input" placeholder="Search" value={text} onChange={e => { const v = e.target.value; setText(v); onChange({ text: v, tags, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }} />
-        <div>
-          <TagsInput
-            value={tags}
-            onChange={(next) => { setTags(next); onChange({ text, tags: next, activities, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}
-            placeholder="Tags"
-            className="mt-1"
-            spaceId={spaceId ?? undefined}
-            invertible
-          />
-        </div>
-        <ActivitiesPicker
-          value={activities}
-          onChange={(next) => { setActivities(next); onChange({ text, tags, activities: next, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}
-          spaceId={spaceId}
-        />
-        {!hideNoParents && (
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={noParents} onChange={e => { setNoParents(e.target.checked); onChange({ text, tags, noParents: e.target.checked, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }} />
-            No parents
-          </label>
-        )}
-        <div className="grid grid-cols-2 gap-2">
-          <select className="input" value={sortField} onChange={e => { const f = e.target.value as SortField; setSortField(f); onChange({ text, tags, noParents, sort: `${f},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
-            <option value="modifiedat">modified_at</option>
-            <option value="createdat">created_at</option>
-            <option value="date">date</option>
-          </select>
-          <select className="input" value={sortDir} onChange={e => { const d = e.target.value as 'ASC' | 'DESC'; setSortDir(d); onChange({ text, tags, noParents, sort: `${sortField},${d}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
-            <option value="DESC">desc</option>
-            <option value="ASC">asc</option>
-          </select>
-        </div>
-        {!hideNoParents && spaceId && (
-          <div className="flex justify-between pt-2">
-            <button className="button" onClick={() => window.dispatchEvent(new CustomEvent('focuz:open-save-filter'))}>Save</button>
+    <div className="min-w-0">
+      <div className="card h-full flex flex-col">
+        <div className="text-title text-muted">Quick filters</div>
+        {/* NOTE: padding is intentional to prevent child shadows from being clipped by the scroll container */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-2 py-2 space-y-3">
+          <input className="input" placeholder="Search" value={text} onChange={e => {
+            const v = e.target.value
+            setText(v)
+            onChange({ text: v, tags, activities: featureFlags.quickFiltersActivities ? activities : undefined, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` })
+          }} />
+          <div>
+            <TagsInput
+              value={tags}
+              onChange={(next) => { setTags(next); onChange({ text, tags: next, activities, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}
+              placeholder="Tags"
+              className="mt-1"
+              spaceId={spaceId ?? undefined}
+              invertible
+            />
           </div>
-        )}
+          {featureFlags.quickFiltersActivities ? (
+            <ActivitiesPicker
+              value={activities}
+              onChange={(next) => { setActivities(next); onChange({ text, tags, activities: next, noParents, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}
+              spaceId={spaceId}
+            />
+          ) : null}
+          {!hideNoParents && (
+            <label className="flex items-center gap-3 text-secondary">
+              <input type="checkbox" checked={noParents} onChange={e => { setNoParents(e.target.checked); onChange({ text, tags, noParents: e.target.checked, sort: `${sortField},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }} />
+              No parents
+            </label>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button type="button" className="input flex items-center justify-between">
+                  <span className="truncate">{sortField === 'modifiedat' ? 'modified_at' : sortField === 'createdat' ? 'created_at' : 'date'}</span>
+                  <span aria-hidden>▾</span>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuItem onSelect={() => { const f: SortField = 'modifiedat'; setSortField(f); onChange({ text, tags, noParents, sort: `${f},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
+                  modified_at
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => { const f: SortField = 'createdat'; setSortField(f); onChange({ text, tags, noParents, sort: `${f},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
+                  created_at
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => { const f: SortField = 'date'; setSortField(f); onChange({ text, tags, noParents, sort: `${f},${sortDir}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
+                  date
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button type="button" className="input flex items-center justify-between">
+                  <span className="truncate">{sortDir === 'DESC' ? 'desc' : 'asc'}</span>
+                  <span aria-hidden>▾</span>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuItem onSelect={() => { const d: 'ASC' | 'DESC' = 'DESC'; setSortDir(d); onChange({ text, tags, noParents, sort: `${sortField},${d}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
+                  desc
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => { const d: 'ASC' | 'DESC' = 'ASC'; setSortDir(d); onChange({ text, tags, noParents, sort: `${sortField},${d}` as `${SortField},ASC` | `${SortField},DESC` }) }}>
+                  asc
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          {!hideNoParents && spaceId && (
+            <div className="flex justify-between pt-2">
+              <button className="button" onClick={() => window.dispatchEvent(new CustomEvent('focuz:open-save-filter'))}>Save</button>
+            </div>
+          )}
+        </div>
       </div>
-    </aside>
+    </div>
   )
 }
 
@@ -492,16 +737,15 @@ function NoteComposer({ spaceId, positiveQuickTags = [] }: { spaceId: number; po
       serverId: null,
       clientId: crypto.randomUUID(),
     }
-    const noteId = await db.notes.add(payload)
+    const noteId = await notesRepo.addDraft(payload)
     // Persist activities drafts (if any)
-    if (Array.isArray((value as any).activities)) {
+    if (featureFlags.noteCreateAddActivity && Array.isArray((value as any).activities)) {
       const { createOrUpdateLocalActivity } = await import('./lib/sync')
       for (const a of (value as any).activities) {
         if (!a || typeof a.typeId !== 'number') continue
         try { await createOrUpdateLocalActivity(noteId, a.typeId, String(a.valueRaw ?? '')) } catch {}
       }
     }
-    window.dispatchEvent(new Event('focuz:local-write'))
     setValue({ text: '', tags: [] })
   }
 
@@ -509,7 +753,7 @@ function NoteComposer({ spaceId, positiveQuickTags = [] }: { spaceId: number; po
     if (!canAdd) return
     const now = new Date().toISOString()
     const mergedTags = Array.from(new Set([...(value.tags || []), ...positiveQuickTags]))
-    const noteId = await db.notes.add({
+    const noteId = await notesRepo.addDraft({
       spaceId,
       title: null,
       text: value.text.trim(),
@@ -523,7 +767,7 @@ function NoteComposer({ spaceId, positiveQuickTags = [] }: { spaceId: number; po
       serverId: null,
       clientId: crypto.randomUUID(),
     } as NoteRecord)
-    if (Array.isArray((value as any).activities)) {
+    if (featureFlags.noteCreateAddActivity && Array.isArray((value as any).activities)) {
       const { createOrUpdateLocalActivity } = await import('./lib/sync')
       for (const a of (value as any).activities) {
         if (!a || typeof a.typeId !== 'number') continue
@@ -538,7 +782,6 @@ function NoteComposer({ spaceId, positiveQuickTags = [] }: { spaceId: number; po
       } catch {}
     }
 
-    window.dispatchEvent(new Event('focuz:local-write'))
     setValue({ text: '', tags: [] })
   }
 
@@ -578,11 +821,7 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
   }, [JSON.stringify(quick), JSON.stringify(filter?.params ?? {}), parentId ?? null])
 
   const notes = useLiveQuery(async () => {
-    let coll = db.notes
-      .where('spaceId')
-      .equals(spaceId)
-      .filter(n => !n.deletedAt)
-    const arr = await coll.toArray()
+    const arr = await notesRepo.listActiveBySpace(spaceId)
     let result = arr
 
     if (idsBySearch) {
@@ -605,11 +844,12 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
       result = result.filter(n => filter!.params!.includeTags!.every(t => n.tags.includes(t)))
     }
     // Activities filter: include notes that have ALL selected activity type names
-    const includeActivitiesNames = new Set<string>([...(((filter?.params as any)?.includeActivities as string[]) || []), ...(((quick as any).activities as string[]) || [])])
+    const quickActivities = featureFlags.quickFiltersActivities ? (((quick as any).activities as string[]) || []) : []
+    const includeActivitiesNames = new Set<string>([...(((filter?.params as any)?.includeActivities as string[]) || []), ...quickActivities])
     if (includeActivitiesNames.size > 0) {
       // Build a map of noteId -> names present
-      const acts = await db.activities.where('noteId').anyOf(result.map(n => n.id!)).toArray()
-      const types = await db.activityTypes.toArray()
+      const acts = await activitiesRepo.listActiveForNotes(result.map(n => n.id!))
+      const types = await activityTypesRepo.listAll()
       const nameByTypeId = new Map(types.map(t => [t.serverId!, t.name]))
       const byNote = new Map<number, Set<string>>()
       for (const a of acts) {
@@ -656,27 +896,14 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
 
   // Parent previews no longer preloaded here; NoteCard handles parent preview on demand
   const repliesById = useLiveQuery(async () => {
-    const all = await db.notes
-      .where('spaceId')
-      .equals(spaceId)
-      .filter(n => !n.deletedAt)
-      .toArray()
-    const tally = new Map<number, number>()
-    for (const note of all) {
-      const pid = note.parentId ?? null
-      if (pid !== null) tally.set(pid, (tally.get(pid) || 0) + 1)
-    }
-    return tally
+    return notesRepo.getRepliesTallyBySpace(spaceId)
   }, [spaceId]) || new Map<number, number>()
 
   async function removeNote(id: number) {
     await deleteNote(id)
     window.dispatchEvent(new Event('focuz:local-write'))
     // Toast with undo
-    try {
-      const { addToast } = await import('./lib/toast')
-      addToast({ message: 'Note deleted', action: { type: 'undo-delete-note', label: 'Undo', payload: { noteId: id } } })
-    } catch {}
+    notifyUndoable('Note deleted', { label: 'Undo', onClick: () => notesRepo.restoreDeleted(id) })
   }
 
   async function saveEdit(id: number, value: { text: string; tags: string[]; activities?: any[] }) {
@@ -684,7 +911,7 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
     // Persist activities edits locally: upsert new/edited and mark removed as deleted
     if (Array.isArray(value.activities)) {
       const { createOrUpdateLocalActivity, deleteLocalActivity } = await import('./lib/sync')
-      const existing = await db.activities.where('noteId').equals(id).toArray()
+      const existing = await activitiesRepo.listForNote(id)
       const current = existing.filter(a => !a.deletedAt)
       const nextTypeIds = new Set<number>(value.activities.map(a => a?.typeId).filter((x: any) => typeof x === 'number'))
       // upsert current values
@@ -707,7 +934,7 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
     await updateNoteLocal(id, { text: value.text.trim(), tags: value.tags })
     if (Array.isArray(value.activities)) {
       const { createOrUpdateLocalActivity, deleteLocalActivity } = await import('./lib/sync')
-      const existing = await db.activities.where('noteId').equals(id).toArray()
+      const existing = await activitiesRepo.listForNote(id)
       const current = existing.filter(a => !a.deletedAt)
       const nextTypeIds = new Set<number>(value.activities.map(a => a?.typeId).filter((x: any) => typeof x === 'number'))
       for (const a of value.activities) {
@@ -750,28 +977,27 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
       serverId: null,
       clientId: crypto.randomUUID(),
     }
-    const newId = await db.notes.add(payload)
-    if (Array.isArray(value.activities)) {
+    const newId = await notesRepo.addDraft(payload)
+    if (featureFlags.noteCreateAddActivity && Array.isArray(value.activities)) {
       const { createOrUpdateLocalActivity } = await import('./lib/sync')
       for (const a of value.activities) {
         if (!a || typeof a.typeId !== 'number') continue
         try { await createOrUpdateLocalActivity(newId, a.typeId, String(a.valueRaw ?? '')) } catch {}
       }
     }
-    window.dispatchEvent(new Event('focuz:local-write'))
     setReplyingForId(null)
     setReplyValue({ text: '', tags: [] })
   }
 
   return (
-    <ul className="space-y-4">
+    <ul className="space-y-5">
       {notes.flatMap((n: NoteRecord) => {
         const items: ReactNode[] = []
         const positiveQuickTags = ((quick as any).tags || []).filter((t: string) => !t.startsWith('!')) as string[]
         const hiddenTagsSet = new Set(positiveQuickTags)
         // Note item (either editor replacing the note, or the note card)
         items.push(
-          <li key={n.id}>
+          <li key={n.id} id={`feed-note-${n.id}`} data-feed-note-id={n.id}>
             {editingId === n.id ? (
               <NoteEditor
                 value={editingValue}
@@ -795,18 +1021,8 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
                 hiddenTags={hiddenTagsSet}
                 onTagClick={(tag) => { if (onAddQuickTag) onAddQuickTag(tag) }}
                 onActivityClick={(name) => { if (onAddQuickActivity) onAddQuickActivity(name) }}
-                childrenRight={
-                  <>
-                    {(repliesById.get(n.id!) || 0) > 0 && (
-                      <button className="text-neutral-400 hover:text-neutral-100 transition" type="button" onClick={() => onOpenThread && onOpenThread(n.id!)}>
-                        ({repliesById.get(n.id!)})
-                      </button>
-                    )}
-                    <button className="text-neutral-400 hover:text-neutral-100 transition" type="button" onClick={() => setReplyingForId(replyingForId === n.id ? null : n.id!)}>
-                      Reply
-                    </button>
-                  </>
-                }
+                repliesCount={repliesById.get(n.id!) || 0}
+                onReplyClick={() => setReplyingForId(replyingForId === n.id ? null : n.id!)}
               />
             )}
           </li>
@@ -825,7 +1041,7 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
                   const now = new Date().toISOString()
                   const positiveQuickTags = ((quick as any).tags || []).filter((t: string) => !t.startsWith('!')) as string[]
                   const mergedTags = Array.from(new Set([...(replyValue.tags || []), ...positiveQuickTags]))
-                  const noteId = await db.notes.add({
+                  const noteId = await notesRepo.addDraft({
                     spaceId,
                     title: null,
                     text: replyValue.text.trim(),
@@ -839,7 +1055,7 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
                     serverId: null,
                     clientId: crypto.randomUUID(),
                   } as NoteRecord)
-                  if (Array.isArray(replyValue.activities)) {
+                  if (featureFlags.noteCreateAddActivity && Array.isArray(replyValue.activities)) {
                     const { createOrUpdateLocalActivity } = await import('./lib/sync')
                     for (const a of replyValue.activities) {
                       if (!a || typeof a.typeId !== 'number') continue
@@ -848,7 +1064,6 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
                   }
                   const files = (extra?.attachments ?? []).slice(0, 10)
                   for (const f of files) { try { await addLocalAttachment(noteId, f) } catch {} }
-                  window.dispatchEvent(new Event('focuz:local-write'))
                   setReplyingForId(null)
                   setReplyValue({ text: '', tags: [] })
                 }}
@@ -869,7 +1084,7 @@ function NoteList({ spaceId, filter, quick, parentId, onOpenThread, onAddQuickTa
   )
 }
 
-function ReauthOverlay({ onDone }: { onDone: () => void }) {
+function ReauthOverlay({ onDone, onLogout }: { onDone: () => void; onLogout: () => void }) {
   const [username, setUsername] = useState<string>(getLastUsername() || '')
   const [password, setPassword] = useState('')
   const [show, setShow] = useState(false)
@@ -899,12 +1114,17 @@ function ReauthOverlay({ onDone }: { onDone: () => void }) {
         <div className="w-full max-w-sm card space-y-4">
           <h2 className="text-lg font-medium">Session expired</h2>
           <input className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} />
-          <div className="flex gap-2">
+          <div className="input-wrap">
             <input className="input" placeholder="Password" type={show ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} />
-            <button className="button" onClick={() => setShow(s => !s)} type="button">{show ? 'Hide' : 'Show'}</button>
+            <button className="icon-btn icon-35 input-icon-btn" onClick={() => setShow(s => !s)} type="button" aria-label={show ? 'Hide password' : 'Show password'}>
+              {show ? <VisibilityOffRoundedIcon fontSize="inherit" /> : <VisibilityRoundedIcon fontSize="inherit" />}
+            </button>
           </div>
           {error && <div className="text-sm text-red-400">{error}</div>}
-          <div className="flex justify-end">
+          <div className="flex justify-between gap-2">
+            <button className="icon-btn icon-35" onClick={onLogout} type="button" aria-label="Logout" disabled={loading}>
+              <LogoutRoundedIcon fontSize="inherit" />
+            </button>
             <button className="button" onClick={submit} disabled={!canSubmit || loading}>{loading ? '...' : 'Sign in'}</button>
           </div>
         </div>
@@ -914,25 +1134,79 @@ function ReauthOverlay({ onDone }: { onDone: () => void }) {
 }
 
 function App() {
+  const topbarRef = useRef<HTMLElement | null>(null)
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const lastScrollTopRef = useRef(0)
+  const lastDirRef = useRef<'up' | 'down' | null>(null)
+  const rafRef = useRef<number | null>(null)
+  const currentSpaceIdRef = useRef<number | null>(null)
+  const currentNoteIdRef = useRef<number | null>(null)
+  type FeedScrollSnapshot = number | { top: number; anchorNoteId?: number; anchorOffset?: number }
+  const feedScrollRef = useRef<Record<number, FeedScrollSnapshot>>({})
+  const feedRestoreReqRef = useRef<{ token: number; spaceId: number; snapshot: FeedScrollSnapshot; tries: number } | null>(null)
+  const [headerHidden, setHeaderHidden] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [authed, setAuthed] = useState<boolean>(isAuthenticated())
   const [currentSpaceId, setCurrentSpaceId] = useState<number | null>(null)
   const [selectedFilter, setSelectedFilter] = useState<FilterRecord | null>(null)
-  const [needReauth, setNeedReauth] = useState<boolean>(() => isAuthRequired())
   const [currentNoteId, setCurrentNoteId] = useState<number | null>(null)
   const [saveOpen, setSaveOpen] = useState(false)
   const [saveName, setSaveName] = useState('')
   // In-memory back trail within tab. Oldest -> newest. Excludes current page. null represents feed (space root)
   const historyTrailRef = useRef<Array<number | null>>([])
+  const authRequired = useAppState(s => s.authRequired)
 
   const [quickFeed, setQuickFeed] = useState<{ text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }>({ text: '', tags: [], noParents: false, sort: 'modifiedat,DESC' })
   const [quickThread, setQuickThread] = useState<{ text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }>({ text: '', tags: [], noParents: false, sort: 'modifiedat,DESC' })
 
   useEffect(() => {
-    const off = onAuthRequired(setNeedReauth)
-    return () => { off() }
+    initAppState()
   }, [])
+
+  useEffect(() => { currentSpaceIdRef.current = currentSpaceId }, [currentSpaceId])
+  useEffect(() => { currentNoteIdRef.current = currentNoteId }, [currentNoteId])
+
+  // Ensure header is visible after auth transitions (otherwise content can be rendered with --topbar-effective-h=0).
+  useEffect(() => {
+    setHeaderHidden(false)
+    lastScrollTopRef.current = 0
+    lastDirRef.current = null
+    // When switching to authed UI, force scroll container to top so header logic starts from a clean state.
+    if (authed) requestAnimationFrame(() => { if (scrollRef.current) scrollRef.current.scrollTop = 0 })
+  }, [authed])
+
+  // Sync CSS var with actual topbar height so we can reuse it for spacers/layout.
+  useLayoutEffect(() => {
+    const el = topbarRef.current
+    const root = document.documentElement
+    if (!authed || !el) {
+      // Default: no topbar in unauthenticated UI.
+      root.style.setProperty('--topbar-h', '96px')
+      root.style.setProperty('--topbar-effective-h', '0px')
+      return
+    }
+    const update = () => {
+      const h = Math.ceil(el.getBoundingClientRect().height)
+      root.style.setProperty('--topbar-h', `${h}px`)
+      // keep effective height in sync when header is visible
+      if (!headerHidden) root.style.setProperty('--topbar-effective-h', `${h}px`)
+    }
+    update()
+    const ro = new ResizeObserver(() => update())
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [authed, headerHidden])
+
+  // Hide on scroll down, show on scroll up. At scrollTop=0 always show.
+  useEffect(() => {
+    const root = document.documentElement
+    const setEffective = (visible: boolean) => {
+      const h = getComputedStyle(root).getPropertyValue('--topbar-h').trim() || '96px'
+      root.style.setProperty('--topbar-effective-h', visible ? h : '0px')
+    }
+    setEffective(authed && !headerHidden)
+  }, [authed, headerHidden])
 
   // URL helpers
   function parseQuery(): { space?: number; note?: number; filter?: number } {
@@ -952,8 +1226,124 @@ function App() {
     else history.pushState(null, '', url)
   }
 
+  function getFeedScrollKey(spaceId: number) { return `ui:scroll:space:${spaceId}:feed` }
+
+  function computeFeedSnapshot(): FeedScrollSnapshot {
+    const el = scrollRef.current
+    if (!el) return 0
+    const top = el.scrollTop
+    // Anchor-based restore is more robust than raw scrollTop when list height changes.
+    try {
+      const containerTop = el.getBoundingClientRect().top
+      const nodes = Array.from(document.querySelectorAll<HTMLElement>('[data-feed-note-id]'))
+      let best: { id: number; offset: number; score: number } | null = null
+      for (const n of nodes) {
+        const raw = n.getAttribute('data-feed-note-id')
+        const id = raw ? Number(raw) : NaN
+        if (!Number.isFinite(id)) continue
+        const r = n.getBoundingClientRect()
+        const relTop = r.top - containerTop
+        const relBottom = r.bottom - containerTop
+        if (relBottom <= 0) continue
+        const score = relTop <= 0 ? Math.abs(relTop) : (100000 + relTop)
+        if (!best || score < best.score) best = { id, offset: relTop, score }
+      }
+      if (best) return { top, anchorNoteId: best.id, anchorOffset: best.offset }
+    } catch {}
+    return { top }
+  }
+
+  function normalizeSnapshot(s: FeedScrollSnapshot): { top: number; anchorNoteId?: number; anchorOffset?: number } {
+    if (typeof s === 'number') return { top: Number.isFinite(s) ? s : 0 }
+    const top = (typeof (s as any)?.top === 'number' && Number.isFinite((s as any).top)) ? (s as any).top : 0
+    const anchorNoteId = (typeof (s as any)?.anchorNoteId === 'number' && Number.isFinite((s as any).anchorNoteId)) ? (s as any).anchorNoteId : undefined
+    const anchorOffset = (typeof (s as any)?.anchorOffset === 'number' && Number.isFinite((s as any).anchorOffset)) ? (s as any).anchorOffset : undefined
+    return { top, anchorNoteId, anchorOffset }
+  }
+
+  async function saveFeedScroll(spaceId: number) {
+    const snap = computeFeedSnapshot()
+    feedScrollRef.current[spaceId] = snap
+    try { await kv.set(getFeedScrollKey(spaceId), snap) } catch {}
+  }
+
+  async function loadFeedSnapshot(spaceId: number): Promise<FeedScrollSnapshot> {
+    const cached = feedScrollRef.current[spaceId]
+    if (cached != null) return cached
+    const stored = await kv.get<FeedScrollSnapshot>(getFeedScrollKey(spaceId))
+    return (stored ?? 0) as FeedScrollSnapshot
+  }
+
+  function isSnapshotInPlace(snapshot: FeedScrollSnapshot) {
+    const el = scrollRef.current
+    if (!el) return false
+    const snap = normalizeSnapshot(snapshot)
+    if (snap.anchorNoteId != null) {
+      const anchorEl = document.getElementById(`feed-note-${snap.anchorNoteId}`)
+      if (!anchorEl) return false
+      const relTop = anchorEl.getBoundingClientRect().top - el.getBoundingClientRect().top
+      const desired = snap.anchorOffset ?? 0
+      return Math.abs(relTop - desired) < 2
+    }
+    return Math.abs(el.scrollTop - snap.top) < 2 || snap.top <= 0
+  }
+
+  function applyFeedRestoreOnce(spaceId: number, snapshot: FeedScrollSnapshot) {
+    if (currentSpaceIdRef.current !== spaceId) return
+    if (currentNoteIdRef.current != null) return
+    const el = scrollRef.current
+    if (!el) return
+
+    const snap = normalizeSnapshot(snapshot)
+    let targetTop = snap.top
+    if (snap.anchorNoteId != null) {
+      const anchorEl = document.getElementById(`feed-note-${snap.anchorNoteId}`)
+      if (anchorEl) {
+        const relTop = anchorEl.getBoundingClientRect().top - el.getBoundingClientRect().top
+        const desired = snap.anchorOffset ?? 0
+        targetTop = el.scrollTop + (relTop - desired)
+      }
+    }
+    el.scrollTop = targetTop
+  }
+
+  function requestFeedRestore(spaceId: number, snapshot: FeedScrollSnapshot) {
+    const token = Date.now() + Math.random()
+    feedRestoreReqRef.current = { token, spaceId, snapshot, tries: 0 }
+
+    const tick = () => {
+      const req = feedRestoreReqRef.current
+      if (!req || req.token !== token) return
+      requestAnimationFrame(() => {
+        const req2 = feedRestoreReqRef.current
+        if (!req2 || req2.token !== token) return
+
+        applyFeedRestoreOnce(spaceId, snapshot)
+
+        const el = scrollRef.current
+        if (!el) return
+        const isScrollable = el.scrollHeight > el.clientHeight + 4
+        const inPlace = isSnapshotInPlace(snapshot)
+        const snap = normalizeSnapshot(snapshot)
+        const shouldRetry = (snap.top > 0 || snap.anchorNoteId != null) && (!isScrollable || !inPlace)
+
+        if (!shouldRetry) { feedRestoreReqRef.current = null; return }
+        req2.tries++
+        if (req2.tries > 25) { feedRestoreReqRef.current = null; return }
+        setTimeout(tick, 50)
+      })
+    }
+
+    tick()
+  }
+
+  async function restoreFeedScroll(spaceId: number) {
+    const snapshot = await loadFeedSnapshot(spaceId)
+    requestFeedRestore(spaceId, snapshot)
+  }
+
   useEffect(() => {
-    document.documentElement.dataset.theme = (document.documentElement.dataset.theme || 'dark')
+    applyStoredTheme()
     initSearch().catch(() => {})
     if (!authed) return
 
@@ -965,18 +1355,26 @@ function App() {
       setCurrentNoteId(note ?? null)
       historyTrailRef.current = note ? [null] : []
       if (filter) {
-        const foundLocal = await db.filters.get(filter)
-        const foundServer = foundLocal ? null : await db.filters.where('serverId').equals(filter).first()
+        const foundLocal = await filtersRepo.getByLocalId(filter)
+        const foundServer = foundLocal ? null : await filtersRepo.getByServerId(filter)
         const found = foundLocal || foundServer
         if (found && found.spaceId === id) setSelectedFilter(found)
       }
       // load persisted quick filters
       if (note) {
-        const saved = await getKV<typeof quickThread>(`quick:space:${id}:note:${note}`)
-        if (saved) setQuickThread((saved as any).tags ? saved : { ...(saved as any), tags: [] })
+        const saved = await kv.get<typeof quickThread>(`quick:space:${id}:note:${note}`)
+        if (saved) {
+          const normalized = (saved as any).tags ? saved : { ...(saved as any), tags: [] }
+          if (!featureFlags.quickFiltersActivities && (normalized as any).activities) delete (normalized as any).activities
+          setQuickThread(normalized as any)
+        }
       } else {
-        const saved = await getKV<typeof quickFeed>(`quick:space:${id}`)
-        if (saved) setQuickFeed((saved as any).tags ? saved : { ...(saved as any), tags: [] })
+        const saved = await kv.get<typeof quickFeed>(`quick:space:${id}`)
+        if (saved) {
+          const normalized = (saved as any).tags ? saved : { ...(saved as any), tags: [] }
+          if (!featureFlags.quickFiltersActivities && (normalized as any).activities) delete (normalized as any).activities
+          setQuickFeed(normalized as any)
+        }
       }
       await ensureNoteIndexForSpace(id)
       await runSync()
@@ -986,17 +1384,25 @@ function App() {
     })
 
     const onPop = () => {
+      const prevSpaceId = currentSpaceIdRef.current
+      const prevNoteId = currentNoteIdRef.current
       const { space: s, note: n, filter: f } = parseQuery()
       if (s) setCurrentSpaceId(s)
       setCurrentNoteId(n ?? null)
       if (f == null) setSelectedFilter(null)
       else {
         void (async () => {
-          const byLocal = await db.filters.get(f)
-          const byServer = byLocal ? null : await db.filters.where('serverId').equals(f).first()
+          const byLocal = await filtersRepo.getByLocalId(f)
+          const byServer = byLocal ? null : await filtersRepo.getByServerId(f)
           const rec = byLocal || byServer || null
           setSelectedFilter(rec)
         })()
+      }
+      // Feed -> thread: capture scroll. Thread -> feed: restore scroll.
+      const effectiveSpaceId = s ?? prevSpaceId
+      if (effectiveSpaceId) {
+        if (prevNoteId == null && (n ?? null) != null) void saveFeedScroll(effectiveSpaceId)
+        if (prevNoteId != null && (n ?? null) == null) void restoreFeedScroll(effectiveSpaceId)
       }
     }
     window.addEventListener('popstate', onPop)
@@ -1025,13 +1431,13 @@ function App() {
       textContains: (currentQuick.text || '').trim() || undefined,
       includeTags: (currentQuick.tags || []).filter(t => !t.startsWith('!')),
       excludeTags: (currentQuick.tags || []).filter(t => t.startsWith('!')).map(t => t.slice(1)),
-      includeActivities: (currentQuick as any).activities || undefined,
+      includeActivities: featureFlags.quickFiltersActivities ? ((currentQuick as any).activities || undefined) : undefined,
       notReply: currentQuick.noParents || undefined,
       sort: currentQuick.sort,
     }
     if (kind === 'update' && selectedFilter?.id) {
       await updateFilterLocal(selectedFilter.id, { name: (saveName.trim() ? saveName.trim() : undefined), params })
-      const rec = await db.filters.get(selectedFilter.id)
+      const rec = await filtersRepo.getByLocalId(selectedFilter.id)
       setSelectedFilter(rec || null)
       setSaveOpen(false)
       setSaveName('')
@@ -1040,7 +1446,7 @@ function App() {
     }
     const parentServerId = (kind === 'save-as-new' ? (selectedFilter?.serverId ?? null) : null) ?? null
     const localId = await createFilterLocal(currentSpaceId, (saveName.trim() || (selectedFilter?.name ?? '')), params, parentServerId)
-    const rec = await db.filters.get(localId)
+    const rec = await filtersRepo.getByLocalId(localId)
     setSelectedFilter(rec || null)
     setSaveOpen(false)
     setSaveName('')
@@ -1061,11 +1467,7 @@ function App() {
         const sort = (typeof p.sort === 'string' ? p.sort : 'modifiedat,DESC') as `${SortField},ASC` | `${SortField},DESC`
         const next = { text, tags: [...include, ...exclude], noParents, sort }
         setQuickFeed(next)
-        await setKV(`quick:space:${currentSpaceId}` , next)
-      } else {
-        const next = { text: '', tags: [], noParents: false, sort: 'modifiedat,DESC' as `${SortField},ASC` | `${SortField},DESC` }
-        setQuickFeed(next)
-        await setKV(`quick:space:${currentSpaceId}` , next)
+        await kv.set(`quick:space:${currentSpaceId}` , next)
       }
     }
     applyFrom().catch(() => {})
@@ -1075,6 +1477,8 @@ function App() {
 
   function openThread(noteId: number) {
     if (!currentSpaceId) return
+    // Save feed scroll position before leaving the feed.
+    if (currentNoteId == null) void saveFeedScroll(currentSpaceId)
     // Update in-tab trail: collapse to before existing target, or push current
     {
       const prev = historyTrailRef.current
@@ -1090,20 +1494,29 @@ function App() {
     // load thread quick
     void (async () => {
       const key = `quick:space:${currentSpaceId}:note:${noteId}`
-      const saved = await getKV<typeof quickThread>(key)
-      if (saved) setQuickThread((saved as any).tags ? saved : { ...(saved as any), tags: [] })
+      const saved = await kv.get<typeof quickThread>(key)
+      if (saved) {
+        const normalized = (saved as any).tags ? saved : { ...(saved as any), tags: [] }
+        if (!featureFlags.quickFiltersActivities && (normalized as any).activities) delete (normalized as any).activities
+        setQuickThread(normalized as any)
+      }
     })()
   }
   function openSpace(spaceId: number) {
     setCurrentSpaceId(spaceId)
     setCurrentNoteId(null)
+    setSelectedFilter(null)
     historyTrailRef.current = []
     pushQuery({ space: spaceId, note: null })
     // load feed quick for space
     void (async () => {
       const key = `quick:space:${spaceId}`
-      const saved = await getKV<typeof quickFeed>(key)
-      if (saved) setQuickFeed((saved as any).tags ? saved : { ...(saved as any), tags: [] })
+      const saved = await kv.get<typeof quickFeed>(key)
+      if (saved) {
+        const normalized = (saved as any).tags ? saved : { ...(saved as any), tags: [] }
+        if (!featureFlags.quickFiltersActivities && (normalized as any).activities) delete (normalized as any).activities
+        setQuickFeed(normalized as any)
+      }
     })()
   }
 
@@ -1114,10 +1527,15 @@ function App() {
       // back to feed
       setCurrentNoteId(null)
       pushQuery({ space: currentSpaceId, note: null, filter: selectedFilter?.id ?? null })
+      void restoreFeedScroll(currentSpaceId)
       // load feed quick
       void (async () => {
-        const saved = await getKV<typeof quickFeed>(`quick:space:${currentSpaceId}`)
-        if (saved) setQuickFeed(saved)
+        const saved = await kv.get<typeof quickFeed>(`quick:space:${currentSpaceId}`)
+        if (saved) {
+          const normalized = (saved as any).tags ? saved : { ...(saved as any), tags: [] }
+          if (!featureFlags.quickFiltersActivities && (normalized as any).activities) delete (normalized as any).activities
+          setQuickFeed(normalized as any)
+        }
       })()
       return
     }
@@ -1126,31 +1544,55 @@ function App() {
     historyTrailRef.current = next
     setCurrentNoteId(target ?? null)
     pushQuery({ space: currentSpaceId, note: target ?? null, filter: selectedFilter?.id ?? null })
+    if (target == null) void restoreFeedScroll(currentSpaceId)
     // load respective quick
     void (async () => {
       if (target == null) {
-        const saved = await getKV<typeof quickFeed>(`quick:space:${currentSpaceId}`)
-        if (saved) setQuickFeed((saved as any).tags ? saved : { ...(saved as any), tags: [] })
+        const saved = await kv.get<typeof quickFeed>(`quick:space:${currentSpaceId}`)
+        if (saved) {
+          const normalized = (saved as any).tags ? saved : { ...(saved as any), tags: [] }
+          if (!featureFlags.quickFiltersActivities && (normalized as any).activities) delete (normalized as any).activities
+          setQuickFeed(normalized as any)
+        }
       } else {
-        const saved = await getKV<typeof quickThread>(`quick:space:${currentSpaceId}:note:${target}`)
-        if (saved) setQuickThread((saved as any).tags ? saved : { ...(saved as any), tags: [] })
+        const saved = await kv.get<typeof quickThread>(`quick:space:${currentSpaceId}:note:${target}`)
+        if (saved) {
+          const normalized = (saved as any).tags ? saved : { ...(saved as any), tags: [] }
+          if (!featureFlags.quickFiltersActivities && (normalized as any).activities) delete (normalized as any).activities
+          setQuickThread(normalized as any)
+        }
       }
     })()
   }
 
   if (!authed) return <AuthScreen onDone={() => setAuthed(true)} />
 
+  const isNoFiltersActive = !selectedFilter && !hasActiveQuickFilters(currentQuick)
+
+  async function clearAllFilters() {
+    if (!currentSpaceId) return
+    // Reset quick filter criteria, but keep current sort (sorting isn't a filter).
+    const base: any = (currentNoteId ? quickThread : quickFeed) || {}
+    const next: any = { ...base, text: '', tags: [], noParents: false, activities: [] }
+    setSelectedFilter(null)
+    setCurrentNoteId(null)
+    setQuickFeed(next)
+    await kv.set(`quick:space:${currentSpaceId}`, next)
+    pushQuery({ space: currentSpaceId, note: null, filter: null })
+  }
+
   const left = currentSpaceId ? (
     <FiltersList
       spaceId={currentSpaceId}
       selectedId={selectedFilter?.id ?? null}
+      isNoFiltersActive={isNoFiltersActive}
       onSelect={(f) => {
         setSelectedFilter(f)
-        if (currentSpaceId) pushQuery({ space: currentSpaceId, note: currentNoteId, filter: f?.id ?? null })
-        if (currentNoteId) {
-          setCurrentNoteId(null)
-        }
+        const nextNote = currentNoteId ? null : currentNoteId
+        if (currentNoteId) setCurrentNoteId(null)
+        if (currentSpaceId) pushQuery({ space: currentSpaceId, note: nextNote, filter: f?.id ?? null })
       }}
+      onClearAll={() => { void clearAllFilters() }}
     />
   ) : null
   let center: ReactNode = null
@@ -1168,13 +1610,13 @@ function App() {
             if (tags.includes(tag)) return
             const next = { ...quickThread, tags: [...tags, tag] }
             setQuickThread(next)
-            if (currentSpaceId && currentNoteId) setKV(`quick:space:${currentSpaceId}:note:${currentNoteId}`, next)
+            if (currentSpaceId && currentNoteId) kv.set(`quick:space:${currentSpaceId}:note:${currentNoteId}`, next)
           }}
         />
       )
     } else {
       center = (
-        <div className="flex-1 min-w-0 space-y-[15px]">
+        <div className="min-w-0 space-y-5">
           <NoteComposer spaceId={currentSpaceId} positiveQuickTags={(quickFeed.tags || []).filter(t => !t.startsWith('!'))} />
           <NoteList
             spaceId={currentSpaceId}
@@ -1187,16 +1629,16 @@ function App() {
               if (tags.includes(tag)) return
               const next = { ...quickFeed, tags: [...tags, tag] }
               setQuickFeed(next)
-              setKV(`quick:space:${currentSpaceId}`, next)
+              kv.set(`quick:space:${currentSpaceId}`, next)
             }}
-            onAddQuickActivity={(name) => {
+            onAddQuickActivity={featureFlags.quickFiltersActivities ? ((name) => {
               if (!currentSpaceId) return
               const acts = (quickFeed as any).activities || []
               if (acts.includes(name)) return
               const next = { ...quickFeed, activities: [...acts, name] }
               setQuickFeed(next as any)
-              setKV(`quick:space:${currentSpaceId}`, next)
-            }}
+              kv.set(`quick:space:${currentSpaceId}`, next)
+            }) : undefined}
           />
         </div>
       )
@@ -1204,33 +1646,134 @@ function App() {
   }
 
   return (
-    <div className="container space-y-4">
-      <TopBar onOpenSpaces={() => setDrawerOpen(true)} onOpenSettings={() => setSettingsOpen(true)} onLogout={() => { setAuthed(false); purgeAndLogout().catch(() => { teardownSync(); logout() }) }} isThread={!!currentNoteId} onBack={goBack} />
-      <div className="flex gap-4">
-        {left}
-        {center}
-        {currentNoteId
-          ? <QuickFiltersPanel
-              value={quickThread}
-              onChange={(v) => { setQuickThread(v); if (currentSpaceId && currentNoteId) setKV(`quick:space:${currentSpaceId}:note:${currentNoteId}`, v) }}
-              hideNoParents
-              spaceId={currentSpaceId}
-            />
-          : <QuickFiltersPanel
-              value={quickFeed}
-              onChange={(v) => { setQuickFeed(v); if (currentSpaceId) setKV(`quick:space:${currentSpaceId}` , v) }}
-              spaceId={currentSpaceId}
-            />
-        }
+    <div className="h-dvh">
+      <header
+        ref={topbarRef}
+        className="fixed left-0 right-0 top-0 z-50"
+        style={{
+          transform: headerHidden ? 'translateY(-100%)' : 'translateY(0)',
+          transition: 'transform 180ms ease',
+          willChange: 'transform',
+        }}
+      >
+        {/* background fade (page bg -> transparent) */}
+        <div
+          className="absolute left-0 right-0 top-0 pointer-events-none"
+          style={{
+            height: 'var(--topbar-h, 96px)',
+            background: 'linear-gradient(to bottom, rgb(var(--c-page)) 0%, rgb(var(--c-page)) 65%, rgb(var(--c-page) / 0) 100%)',
+          }}
+        />
+        <div className="relative mx-auto max-w-[1440px] px-[40px] py-6">
+          <TopBar
+            onOpenSpaces={() => setDrawerOpen(true)}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onLogout={() => { setAuthed(false); purgeAndLogout().catch(() => { teardownSync(); logout() }) }}
+            isThread={!!currentNoteId}
+            onBack={goBack}
+          />
+        </div>
+      </header>
+
+      <SystemStatusLayer />
+
+      {/* Global scroll container (scrollbar at viewport edge).
+          Sidebars are sticky inside it, so they stay pinned to the screen while feed scrolls. */}
+      <div
+        ref={scrollRef}
+        className="fixed inset-0 overflow-y-auto"
+        style={{
+          paddingTop: 'var(--topbar-effective-h, var(--topbar-h, 96px))',
+          transition: 'padding-top 180ms ease',
+        }}
+        onScroll={(e) => {
+          const el = e.currentTarget
+          const st = el.scrollTop
+          const last = lastScrollTopRef.current
+          lastScrollTopRef.current = st
+          if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
+          rafRef.current = requestAnimationFrame(() => {
+            if (st <= 0) { setHeaderHidden(false); lastDirRef.current = null; return }
+            const delta = st - last
+            if (Math.abs(delta) < 6) return
+            if (delta > 0) {
+              if (st > 80) setHeaderHidden(true)
+              lastDirRef.current = 'down'
+            } else {
+              setHeaderHidden(false)
+              lastDirRef.current = 'up'
+            }
+          })
+        }}
+      >
+        <div className="mx-auto max-w-[1440px] px-[40px]">
+          <div className="grid grid-cols-1 md:grid-cols-[340px_minmax(0,1fr)] lg:grid-cols-[340px_minmax(0,1fr)_340px] gap-[40px]">
+            <aside
+              className="hidden md:block py-6 self-start"
+              style={{
+                position: 'sticky',
+                // The global scroll container already has padding-top = topbar height.
+                // So sticky top should be 0 to avoid double offset.
+                top: 0,
+                height: 'calc(100vh - var(--topbar-effective-h, var(--topbar-h, 96px)))',
+              }}
+            >
+              <div className="h-full">{left}</div>
+            </aside>
+
+            <main className="min-w-0 py-6">
+              {center}
+              {/* Spacer below feed equals topbar height */}
+              <div style={{ height: 'var(--topbar-h, 96px)' }} />
+            </main>
+
+            <aside
+              className="hidden lg:block py-6 self-start"
+              style={{
+                position: 'sticky',
+                top: 0,
+                height: 'calc(100vh - var(--topbar-effective-h, var(--topbar-h, 96px)))',
+              }}
+            >
+              <div className="h-full">
+                {currentNoteId
+                  ? <QuickFiltersPanel
+                      value={quickThread}
+                      onChange={(v) => { setQuickThread(v); if (currentSpaceId && currentNoteId) kv.set(`quick:space:${currentSpaceId}:note:${currentNoteId}`, v) }}
+                      hideNoParents
+                      spaceId={currentSpaceId}
+                    />
+                  : <QuickFiltersPanel
+                      value={quickFeed}
+                      onChange={(v) => {
+                        setQuickFeed(v)
+                        if (currentSpaceId) kv.set(`quick:space:${currentSpaceId}` , v)
+                        if (selectedFilter) {
+                          setSelectedFilter(null)
+                          pushQuery({ space: currentSpaceId!, note: null, filter: null })
+                        }
+                      }}
+                      spaceId={currentSpaceId}
+                    />
+                }
+              </div>
+            </aside>
+          </div>
+        </div>
       </div>
 
       {drawerOpen && <SpaceDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} currentId={currentSpaceId} onSelected={(id) => { openSpace(id) }} />}
-      {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
-      {needReauth && <ReauthOverlay onDone={() => setNeedReauth(false)} />}
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      {authRequired && (
+        <ReauthOverlay
+          onDone={() => { /* authRequired toggled by sync module */ }}
+          onLogout={() => { setAuthed(false); purgeAndLogout().catch(() => { teardownSync(); logout() }) }}
+        />
+      )}
       {saveOpen && (
-        <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50">
-          <div className="w-full sm:max-w-md bg-neutral-900 border border-neutral-800 rounded-t-xl sm:rounded-xl p-4 space-y-3">
-            <h2 className="text-lg font-medium">Save filter</h2>
+        <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-[110]">
+          <div className="w-full sm:max-w-md surface space-y-5">
+            <h2 className="text-title text-muted">Save filter</h2>
             <input
               className="input"
               placeholder={selectedFilter ? (selectedFilter.name || 'enter filter name') : 'enter filter name'}
@@ -1238,7 +1781,10 @@ function App() {
               onChange={e => setSaveName(e.target.value)}
             />
             <div className="flex justify-between">
-              <button className="button" onClick={() => handleSaveOrUpdate('save-as-new')}>Save as new</button>
+              {selectedFilter?.id
+                ? <button className="button" onClick={() => handleSaveOrUpdate('save-as-new')}>Create</button>
+                : <div />
+              }
               <div className="flex gap-2">
                 <button className="button" onClick={() => { setSaveOpen(false); setSaveName('') }}>Cancel</button>
                 <button className="button" onClick={() => handleSaveOrUpdate((selectedFilter?.id ? 'update' : 'save'))}>{selectedFilter?.id ? 'Update' : 'Save'}</button>
@@ -1247,7 +1793,7 @@ function App() {
           </div>
         </div>
       )}
-      <Toasts />
+      <AppToaster />
     </div>
   )
 }
@@ -1280,15 +1826,14 @@ function ReplyComposer({ spaceId, parentId, positiveQuickTags = [] }: { spaceId:
       serverId: null,
       clientId: crypto.randomUUID(),
     }
-    await db.notes.add(payload)
-    window.dispatchEvent(new Event('focuz:local-write'))
+    await notesRepo.addDraft(payload)
     setValue({ text: '', tags: [] })
   }
   async function addReplyWithAttachments(extra: { attachments?: File[] }) {
     if (!canAdd) return
     const now = new Date().toISOString()
     const mergedTags = Array.from(new Set([...(value.tags || []), ...positiveQuickTags]))
-    const noteId = await db.notes.add({
+    const noteId = await notesRepo.addDraft({
       spaceId,
       title: null,
       text: value.text.trim(),
@@ -1306,7 +1851,6 @@ function ReplyComposer({ spaceId, parentId, positiveQuickTags = [] }: { spaceId:
     for (const f of files) {
       try { await addLocalAttachment(noteId, f) } catch {}
     }
-    window.dispatchEvent(new Event('focuz:local-write'))
     setValue({ text: '', tags: [] })
   }
   return (
@@ -1315,7 +1859,7 @@ function ReplyComposer({ spaceId, parentId, positiveQuickTags = [] }: { spaceId:
 }
 
 function NoteThread({ spaceId, noteId, onBack, onOpenThread, quick, onAddQuickTag }: { spaceId: number; noteId: number; onBack: () => void; onOpenThread: (nid: number) => void; quick: { text: string; tags: string[]; noParents: boolean; sort: `${SortField},ASC` | `${SortField},DESC` }; onAddQuickTag?: (tag: string) => void }) {
-  const mainNote = useLiveQuery(() => db.notes.get(noteId), [noteId]) as NoteRecord | undefined
+  const mainNote = useLiveQuery(() => notesRepo.getByLocalId(noteId), [noteId]) as NoteRecord | undefined
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState<NoteEditorValue>({ text: '', tags: [] })
 
@@ -1338,7 +1882,7 @@ function NoteThread({ spaceId, noteId, onBack, onOpenThread, quick, onAddQuickTa
 
   if (!mainNote || mainNote.spaceId !== spaceId || mainNote.deletedAt) {
     return (
-      <div className="flex-1 space-y-[15px]">
+      <div className="space-y-5">
         <div className="card p-4">
           <div className="mb-3">Note not found</div>
           <button className="button" onClick={onBack}>Back</button>
@@ -1348,7 +1892,7 @@ function NoteThread({ spaceId, noteId, onBack, onOpenThread, quick, onAddQuickTa
   }
 
   return (
-    <div className="flex-1 min-w-0 space-y-[15px]">
+    <div className="min-w-0 space-y-5">
       {editing ? (
         <NoteEditor value={editValue} onChange={setEditValue} onSubmit={saveEdit} onCancel={() => setEditing(false)} mode="edit" autoCollapse={false} spaceId={spaceId} noteId={noteId} />
       ) : (

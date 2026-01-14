@@ -1,111 +1,95 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import type { NoteRecord } from '../lib/types'
-import { db } from '../lib/db'
+import { activities as activitiesRepo, notes as notesRepo } from '../data'
+import { getLastUsername } from '../lib/sync'
+import { useAppState } from '../lib/app-state'
 // import HighlightedText from './HighlightedText'
 import ParagraphText from './ParagraphText'
 import NoteImages from './NoteImages'
 import { formatExactDateTime, formatRelativeShort, formatDurationShort, parseDurationToMs } from '../lib/time'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './ui/dropdown-menu'
+import { Pill } from './ui/pill'
+import { SurfaceNoPad } from './ui/surface'
+import SubdirectoryArrowRightRoundedIcon from '@mui/icons-material/SubdirectoryArrowRightRounded'
+import DoneRoundedIcon from '@mui/icons-material/DoneRounded'
+import DoneAllRoundedIcon from '@mui/icons-material/DoneAllRounded'
 
 export default function NoteCard({
   note,
   onEdit,
   onDelete,
   onOpenThread,
-  childrenRight,
   showParentPreview = false,
   onTagClick,
   onActivityClick,
   hiddenTags,
+  repliesCount = 0,
+  onReplyClick,
 }: {
   note: NoteRecord
   onEdit?: () => void
   onDelete?: () => void
   onOpenThread?: (nid: number) => void
-  childrenRight?: React.ReactNode
   showParentPreview?: boolean
   onTagClick?: (tag: string) => void
   onActivityClick?: (name: string) => void
   hiddenTags?: Set<string>
+  repliesCount?: number
+  onReplyClick?: () => void
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
-  const menuContainerRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    function onDocClick(e: MouseEvent) {
-      const target = e.target as Node
-      if (!menuContainerRef.current) return
-      if (!menuContainerRef.current.contains(target)) setMenuOpen(false)
-    }
-    if (menuOpen) document.addEventListener('click', onDocClick)
-    return () => document.removeEventListener('click', onDocClick)
-  }, [menuOpen])
-  const parentNote = useLiveQuery(() => showParentPreview && note.parentId ? db.notes.get(note.parentId) : Promise.resolve(undefined), [showParentPreview, note.parentId]) as NoteRecord | undefined
-  const activities = useLiveQuery(async () => {
-    const list = await db.activities.where('noteId').equals(note.id!).toArray()
-    const filtered = list.filter(a => !a.deletedAt)
-    // Deduplicate per typeId: prefer server-backed; fallback to most recent modifiedAt
-    const bestByType = new Map<number, typeof filtered[number]>()
-    for (const a of filtered) {
-      const prev = bestByType.get(a.typeId)
-      if (!prev) { bestByType.set(a.typeId, a); continue }
-      const score = (Number(!!a.serverId) - Number(!!prev.serverId)) || ((a.modifiedAt || '').localeCompare(prev.modifiedAt || ''))
-      if (score > 0) bestByType.set(a.typeId, a)
-    }
-    const deduped = Array.from(bestByType.values())
-    // join names and valueTypes
-    const types = await db.activityTypes.toArray()
-    const byId = new Map(types.map(t => [t.serverId!, t]))
-    return deduped.map(a => ({
-      ...a,
-      _name: byId.get(a.typeId)?.name || `#${a.typeId}`,
-      _valueType: byId.get(a.typeId)?.valueType || 'text',
-    }))
-  }, [note.id]) as Array<any> || []
+  const syncing = useAppState(s => s.syncing)
+  const parentNote = useLiveQuery(
+    () => (showParentPreview && note.parentId ? notesRepo.getByLocalId(note.parentId) : Promise.resolve(undefined)),
+    [showParentPreview, note.parentId],
+  ) as NoteRecord | undefined
+  const activities = (useLiveQuery(
+    () => (note.id ? activitiesRepo.listDecoratedForNote(note.id) : Promise.resolve([])),
+    [note.id],
+  ) as Array<{ valueRaw: string; _name: string; _valueType: string; id?: number; serverId?: number | null }>) || []
+
+  const author = getLastUsername() || 'me'
+  const hasReplies = Number.isFinite(repliesCount) && repliesCount > 0
+  // Sync status rules:
+  // - Done: created/edited locally but not yet synced (no serverId or isDirty=1)
+  // - DoneAll: synced at least once successfully (serverId exists and isDirty=0), regardless of current network/server availability
+  const isSynced = note.serverId != null && note.isDirty === 0
+  const syncStage: 'pending' | 'syncing' | 'synced' = isSynced ? (syncing ? 'syncing' : 'synced') : 'pending'
 
   return (
-    <div className="card-nopad">
-      <div className="h-[30px] relative">
-        <div ref={menuContainerRef} className="absolute right-4 top-0 h-[30px] flex items-center">
-          {(onEdit || onDelete) && (
-            <div className="relative">
-              <button className="px-1 text-neutral-400 hover:text-neutral-100 h-[30px]" onClick={() => setMenuOpen(s => !s)} aria-label="Open menu">⋯</button>
-              {menuOpen && (
-                <div className="absolute right-0 top-full mt-1 z-10 rounded border border-neutral-800 bg-neutral-900 shadow-lg">
-                  {onEdit && <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpen(false); onEdit() }}>Edit</button>}
-                  {onDelete && <button className="block w-full text-left px-3 py-2 text-sm hover:bg-neutral-800" onClick={() => { setMenuOpen(false); onDelete() }}>Delete</button>}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-      <div className="px-4 min-w-0">
+    <SurfaceNoPad className="relative group">
+      <div className="p-[25px] min-w-0 space-y-5">
+        {/* Reply preview (pill) */}
         {showParentPreview && note.parentId != null && parentNote && !parentNote.deletedAt && (
-          <div className="mb-2 min-w-0 max-w-full">
-            <button
-              className="block w-full max-w-full min-w-0 box-border rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-secondary hover:bg-neutral-800 select-none overflow-hidden text-left"
-              type="button"
+          <div className="min-w-0 max-w-full">
+            <Pill
+              className="w-full justify-start overflow-hidden text-left pill-reply-preview"
               onClick={() => onOpenThread && onOpenThread(parentNote.id!)}
               title={parentNote.text}
             >
               <span className="block overflow-hidden text-ellipsis whitespace-nowrap">{parentNote.text}</span>
-            </button>
+            </Pill>
           </div>
         )}
-        {/* Render note text as paragraphs with spacing; keep highlight infra ready if needed later */}
+
+        {/* Images */}
+        <NoteImages noteId={note.id!} />
+
+        {/* Text */}
         <ParagraphText className="text-primary" text={note.text} />
+
+        {/* Activities (pills) */}
         {activities.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-3">
             {activities.map((a, i) => (
-              <button
+              <Pill
                 key={`${a.serverId ?? a.id}-${i}`}
-                type="button"
-                className="inline-flex items-center rounded-full bg-neutral-800 px-2 py-1 text-xs text-secondary hover:bg-neutral-700 select-none"
                 onClick={() => onActivityClick ? onActivityClick(a._name) : (onTagClick && onTagClick(a._name))}
                 title={`${a._name}: ${a.valueRaw}`}
               >
-                <span className="mr-1 text-neutral-300">{a._name}:</span>
-                <span className="text-neutral-200">{(() => {
+                <span className="mr-2">{a._name}:</span>
+                <span className="text-primary">{(() => {
                   if (a?._valueType === 'time') {
                     const numMs = Number(a.valueRaw)
                     if (Number.isFinite(numMs)) return formatDurationShort(numMs)
@@ -114,42 +98,105 @@ export default function NoteCard({
                   }
                   return a.valueRaw
                 })()}</span>
-              </button>
+              </Pill>
             ))}
           </div>
         )}
-        <NoteImages noteId={note.id!} />
+
+        {/* Tags (pills) */}
         {note.tags?.length ? (
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className="relative z-20 flex flex-wrap gap-3">
             {note.tags.filter(t => !(hiddenTags?.has(t))).map((t, i) => (
-              <button
+              <Pill
                 key={`${t}-${i}`}
-                type="button"
-                className="inline-flex items-center rounded-full bg-neutral-800 px-2 py-1 text-xs text-secondary hover:bg-neutral-700 select-none"
+                className="pill-tag"
                 onClick={() => onTagClick && onTagClick(t)}
                 title={t}
               >
                 {t}
-              </button>
+              </Pill>
             ))}
           </div>
         ) : null}
-      </div>
-      <div className="px-4 py-2 text-secondary flex items-center justify-between">
-        {onOpenThread ? (
-          <button className="flex items-center gap-2 text-neutral-400 hover:text-neutral-100" title={formatExactDateTime(note.createdAt)} onClick={() => onOpenThread(note.id!)}>
-            <span>{note.isDirty ? '✔' : '✔✔'}</span>
-            <span>{formatRelativeShort(note.createdAt)}</span>
-          </button>
-        ) : (
-          <div className="flex items-center gap-2" title={formatExactDateTime(note.createdAt)}>
-            <span>{note.isDirty ? '✔' : '✔✔'}</span>
-            <span>{formatRelativeShort(note.createdAt)}</span>
+
+        {/* Footer */}
+        <div className="relative z-0 flex items-baseline justify-between">
+          <div className="min-w-0">
+            {hasReplies && (
+              <button className="note-footer inline-flex items-baseline gap-2 text-primary hover:underline" type="button" onClick={() => onOpenThread && onOpenThread(note.id!)}>
+                <SubdirectoryArrowRightRoundedIcon fontSize="inherit" className="icon-35 icon-shift-down-15 text-secondary" />
+                <span>{repliesCount} {repliesCount === 1 ? 'reply' : 'replies'}</span>
+              </button>
+            )}
           </div>
-        )}
-        <div className="flex items-center gap-3">{childrenRight}</div>
+
+          <div className="note-footer flex items-baseline gap-2 text-secondary" title={formatExactDateTime(note.createdAt)}>
+            <span className="truncate">{author}</span>
+            <span aria-hidden style={{ fontWeight: 700 }}>·</span>
+            <span>{formatRelativeShort(note.createdAt)}</span>
+            <span aria-label={syncStage === 'pending' ? 'Not synced yet' : syncStage === 'syncing' ? 'Syncing' : 'Synced'}>
+              {syncStage === 'pending'
+                ? <DoneRoundedIcon fontSize="inherit" className="icon-35 text-secondary" />
+                : syncStage === 'syncing'
+                  ? <DoneRoundedIcon fontSize="inherit" className="icon-35 text-secondary" />
+                  : <DoneAllRoundedIcon fontSize="inherit" className="icon-35 text-secondary" />}
+            </span>
+          </div>
+        </div>
       </div>
-    </div>
+
+      {/* Hover overlay: blocks footer actions, tags remain clickable (higher z-index) */}
+      {onOpenThread && (
+        <div
+          className={[
+            'absolute inset-x-0 bottom-0 z-10 h-[118px] transition-opacity',
+            (menuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'),
+          ].join(' ')}
+          style={{
+            background: 'linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.15) 100%)',
+            backdropFilter: 'blur(2px)',
+            borderBottomLeftRadius: '15px',
+            borderBottomRightRadius: '15px',
+            WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 55%, black 100%)',
+            maskImage: 'linear-gradient(to bottom, transparent 0%, black 55%, black 100%)',
+          }}
+        >
+          {/* click-anywhere area to open note */}
+          <button
+            type="button"
+            className="absolute inset-0 w-full h-full"
+            onClick={() => onOpenThread(note.id!)}
+            aria-label="Open note"
+          />
+
+          {/* menu trigger (the circle) */}
+          <div className="absolute right-[25px] bottom-[20px] z-20">
+            <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="flex items-center justify-center w-[52px] h-[52px] rounded-full"
+                  style={{
+                    background: 'rgb(var(--c-surface))',
+                    boxShadow: '0 0 8px 8px rgb(var(--c-surface) / 0.85)',
+                  }}
+                  aria-label="Open actions"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  ⋮
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+                {onReplyClick && <DropdownMenuItem onSelect={() => onReplyClick()}>Reply</DropdownMenuItem>}
+                {onEdit && <DropdownMenuItem onSelect={() => onEdit()}>Edit</DropdownMenuItem>}
+                {onDelete && <DropdownMenuItem onSelect={() => onDelete()}>Delete</DropdownMenuItem>}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </div>
+      )}
+
+    </SurfaceNoPad>
   )
 }
 

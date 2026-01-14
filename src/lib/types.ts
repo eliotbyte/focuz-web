@@ -29,9 +29,38 @@ export interface NoteRecord {
   isDirty: 0 | 1
 }
 
+export interface NoteConflictRecord {
+  id?: number
+  noteLocalId: number
+  noteServerId: number
+  reason: string
+  // Local snapshot of the note at conflict time. Keep it JSON-friendly.
+  local: {
+    serverId?: number | null
+    clientId?: string | null
+    spaceId: number
+    title?: string | null
+    text: string
+    tags: string[]
+    createdAt: string
+    modifiedAt: string
+    date?: string
+    parentId?: number | null
+    deletedAt?: string | null
+  }
+  // Server snapshot returned by API (shape depends on backend response).
+  server?: any
+  createdAt: string
+  isResolved: 0 | 1
+  resolvedAt?: string | null
+}
+
 export interface AttachmentRecord {
   id?: number
   serverId?: string | null
+  // Stable client-generated id used for idempotent uploads.
+  // Prevents duplicate server attachments on retries/timeouts.
+  clientId?: string | null
   noteId: number
   fileName: string
   fileType: string

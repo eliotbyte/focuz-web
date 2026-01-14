@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useObjectUrl } from '../lib/useObjectUrl'
 import TagsInput from './TagsInput'
 import ActivitiesInput, { type ActivityDraft } from './ActivitiesInput'
+import { featureFlags } from '../lib/feature-flags'
 import { compressToWebP, getImageDimensions, validateImageGeometry } from '../lib/image'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '../lib/db'
 import type { AttachmentRecord } from '../lib/types'
+import { activities as activitiesRepo, attachments as attachmentsRepo } from '../data'
 import { deleteLocalAttachment, reorderNoteAttachments } from '../lib/sync'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from './ui/dropdown-menu'
 
 export type NoteEditorMode = 'create' | 'edit' | 'reply'
 
@@ -47,15 +49,14 @@ export default function NoteEditor({
   const textRef = useRef<HTMLTextAreaElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [attachments, setAttachments] = useState<File[]>([])
-  const [menuOpen, setMenuOpen] = useState(false)
-  const [activities, setActivities] = useState<ActivityDraft[]>(value.activities || [])
+  const allowActivities = mode === 'edit' ? true : featureFlags.noteCreateAddActivity
+  const [activities, setActivities] = useState<ActivityDraft[]>(allowActivities ? (value.activities || []) : [])
   const [editRequestTypeId, setEditRequestTypeId] = useState<number | null>(null)
 
   // Existing attachments for edit mode
   const existingAttachments = (useLiveQuery(async () => {
     if (!noteId || mode !== 'edit') return [] as AttachmentRecord[]
-    const list = await db.attachments.where('noteId').equals(noteId).toArray()
-    return list.filter(a => !a.deletedAt).sort((a, b) => (a.modifiedAt || '').localeCompare(b.modifiedAt || ''))
+    return attachmentsRepo.listActiveSortedForNote(noteId)
   }, [noteId, mode]) ?? []) as AttachmentRecord[]
 
   const canSubmit = useMemo(() => value.text.trim().length > 0, [value.text])
@@ -75,19 +76,18 @@ export default function NoteEditor({
     autoResize(textRef.current)
   }, [value.text, expanded])
 
+  // Hard gate: never keep activities drafts in production for create/reply.
+  useEffect(() => {
+    if (allowActivities) return
+    if (Array.isArray(value.activities) && value.activities.length > 0) onChange({ ...value, activities: [] })
+    if (activities.length > 0) setActivities([])
+  }, [allowActivities])
+
   // Prefill activities for edit mode from DB if not provided (deduplicated per typeId)
   const existingActivities = (useLiveQuery(async () => {
     if (!noteId || mode !== 'edit') return [] as Array<{ typeId: number; valueRaw: string }>
-    const acts = await db.activities.where('noteId').equals(noteId).toArray()
-    const filtered = acts.filter(a => !a.deletedAt)
-    const bestByType = new Map<number, typeof filtered[number]>()
-    for (const a of filtered) {
-      const prev = bestByType.get(a.typeId)
-      if (!prev) { bestByType.set(a.typeId, a); continue }
-      const score = (Number(!!a.serverId) - Number(!!prev.serverId)) || ((a.modifiedAt || '').localeCompare(prev.modifiedAt || ''))
-      if (score > 0) bestByType.set(a.typeId, a)
-    }
-    return Array.from(bestByType.values()).map(a => ({ typeId: a.typeId, valueRaw: a.valueRaw }))
+    const drafts = await activitiesRepo.listDraftsForNote(noteId)
+    return drafts.map(a => ({ typeId: a.typeId, valueRaw: a.valueRaw }))
   }, [noteId, mode]) || []) as Array<ActivityDraft>
 
   useEffect(() => {
@@ -96,16 +96,6 @@ export default function NoteEditor({
       onChange({ ...value, activities: existingActivities })
     }
   }, [mode, noteId, existingActivities])
-
-  useEffect(() => {
-    function onDocClick(e: MouseEvent) {
-      const target = e.target as HTMLElement
-      // close if clicked outside of our inline menu container
-      if (!target.closest?.('[data-addmenu="1"]')) setMenuOpen(false)
-    }
-    if (menuOpen) document.addEventListener('click', onDocClick)
-    return () => document.removeEventListener('click', onDocClick)
-  }, [menuOpen])
 
   function collapseIfNeeded() {
     if (autoCollapse && (mode === 'create' || mode === 'reply')) setExpanded(false)
@@ -137,14 +127,16 @@ export default function NoteEditor({
         onChange={e => onChange({ ...value, text: e.target.value })}
         onInput={e => autoResize(e.currentTarget)}
       />
-      <ActivitiesInput
-        value={activities}
-        onChange={(acts) => { setActivities(acts); onChange({ ...value, activities: acts }) }}
-        spaceId={spaceId}
-        hideAddButton
-        requestEditTypeId={editRequestTypeId}
-        onEditRequestHandled={() => setEditRequestTypeId(null)}
-      />
+      {allowActivities ? (
+        <ActivitiesInput
+          value={activities}
+          onChange={(acts) => { setActivities(acts); onChange({ ...value, activities: acts }) }}
+          spaceId={spaceId}
+          hideAddButton
+          requestEditTypeId={editRequestTypeId}
+          onEditRequestHandled={() => setEditRequestTypeId(null)}
+        />
+      ) : null}
       <TagsInput value={value.tags} onChange={tags => onChange({ ...value, tags })} placeholder="Add tags" spaceId={spaceId} />
       {mode === 'edit' && existingAttachments.length > 0 && attachments.length === 0 && (
         <div className="text-xs text-neutral-400">Adding new photos will be uploaded when you click Update.</div>
@@ -250,30 +242,32 @@ export default function NoteEditor({
       }} />
       <div className="flex justify-end gap-2">
         <div className="flex-1">
-          <div className="inline-block relative" data-addmenu="1">
-            <button
-              type="button"
-              className="button"
-              onClick={() => setMenuOpen(v => !v)}
-            >Add</button>
-            {menuOpen && (
-              <div className="absolute z-10 mt-1 w-40 card p-1">
-                <button
-                  type="button"
-                  className="w-full text-left px-2 py-1 rounded hover:bg-neutral-800 disabled:opacity-50"
-                  onClick={() => { setMenuOpen(false); fileInputRef.current?.click() }}
-                  disabled={maxReached}
-                >Photo</button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button type="button" className="button">Add</button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-44">
+              <DropdownMenuItem
+                disabled={maxReached}
+                className="disabled:opacity-50"
+                onSelect={() => { fileInputRef.current?.click() }}
+              >
+                Photo
+              </DropdownMenuItem>
+              {allowActivities ? (
+                <>
+                  <DropdownMenuSeparator />
                 <ActivitiesInput
                   value={activities}
                   onChange={(acts) => { setActivities(acts); onChange({ ...value, activities: acts }); }}
                   spaceId={spaceId}
                   menuOnly
-                  onAddedType={(tid) => { setEditRequestTypeId(tid); setMenuOpen(false) }}
+                  onAddedType={(tid) => { setEditRequestTypeId(tid) }}
                 />
-              </div>
-            )}
-          </div>
+                </>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
         {onCancel && (
           <button className="button" onClick={() => { onCancel(); setAttachments([]); collapseIfNeeded() }}>Cancel</button>

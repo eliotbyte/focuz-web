@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '../lib/db'
+import { activityTypes } from '../data'
 
 export default function ActivitiesPicker({
   value,
@@ -17,14 +18,11 @@ export default function ActivitiesPicker({
   const [focused, setFocused] = useState<boolean>(false)
   const [selectedIdx, setSelectedIdx] = useState<number>(-1)
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [menuRect, setMenuRect] = useState<{ left: number; top: number; width: number } | null>(null)
 
   const types = useLiveQuery(async () => {
-    const all = await db.activityTypes.toArray()
-    const list = (spaceId != null)
-      ? all.filter(t => (t.spaceId === spaceId || t.spaceId === 0 || t.spaceId == null) && !t.deletedAt)
-      : all.filter(t => !t.deletedAt)
-    list.sort((a, b) => a.name.localeCompare(b.name))
-    return list
+    return activityTypes.listForSpace(spaceId)
   }, [spaceId]) || []
   const names = useMemo(() => types.map(t => t.name), [types])
 
@@ -95,15 +93,37 @@ export default function ActivitiesPicker({
     else setDraft('')
   }
 
+  const menuOpen = focused && suggestions.length > 0
+
+  useEffect(() => {
+    if (!menuOpen) { setMenuRect(null); return }
+    if (typeof window === 'undefined') return
+
+    const update = () => {
+      const el = containerRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      setMenuRect({ left: r.left, top: r.bottom + 4, width: r.width })
+    }
+
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+    }
+  }, [menuOpen, suggestions.length])
+
   return (
-    <div className="w-full relative">
+    <div className="w-full relative" ref={containerRef}>
       <div className="input min-h-10 py-1 flex items-center gap-2 flex-wrap" onClick={() => inputRef.current?.focus()}>
         {value.map((n, i) => (
-          <span key={`${n}-${i}`} className="inline-flex items-center gap-1 rounded-full bg-neutral-800 px-2 py-1 text-xs text-secondary">
+          <span key={`${n}-${i}`} className="pill pill-tag gap-2">
             <span>{n}</span>
             <button
               type="button"
-              className="text-neutral-400 hover:text-neutral-200"
+              className="text-secondary hover:text-primary"
               onClick={(e) => { e.preventDefault(); e.stopPropagation(); onChange(value.filter(x => x !== n)) }}
               aria-label="Remove activity filter"
               title="Remove"
@@ -121,20 +141,26 @@ export default function ActivitiesPicker({
           onBlur={handleBlur}
         />
       </div>
-      {focused && suggestions.length > 0 && (
-        <div className="absolute left-0 top-full mt-1 z-50 w-full max-h-60 overflow-auto rounded border border-neutral-800 bg-neutral-900 py-1">
-          {suggestions.map((s, i) => (
-            <button
-              key={`${s}-${i}`}
-              type="button"
-              className={`block w-full text-left px-3 py-2 text-sm ${i === selectedIdx ? 'bg-neutral-800 text-neutral-100' : 'text-secondary hover:bg-neutral-800'}`}
-              onMouseDown={e => e.preventDefault()}
-              onClick={() => pushActivity(s)}
-            >
-              {s}
-            </button>
-          ))}
-        </div>
+      {menuOpen && menuRect && createPortal(
+        <div
+          className="dropdown-menu z-[200]"
+          style={{ position: 'fixed', left: menuRect.left, top: menuRect.top, width: menuRect.width }}
+        >
+          <div className="max-h-60 overflow-auto">
+            {suggestions.map((s, i) => (
+              <button
+                key={`${s}-${i}`}
+                type="button"
+                className={`dropdown-item ${i === selectedIdx ? 'text-primary' : ''}`}
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => pushActivity(s)}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useObjectUrl } from '../lib/useObjectUrl'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '../lib/db'
 import type { AttachmentRecord } from '../lib/types'
+import { attachments as attachmentsRepo } from '../data'
 import { requestAttachmentPrefetch } from '../lib/sync'
 
 export default function NoteImages({ noteId }: { noteId: number }) {
@@ -16,35 +17,7 @@ export default function NoteImages({ noteId }: { noteId: number }) {
   const wheelCooldownRef = useRef<number | null>(null)
 
   const attachments = (useLiveQuery(async () => {
-    const list = await db.attachments.where('noteId').equals(noteId).toArray()
-    // Deduplicate: prefer server-side id when present; otherwise use (fileName,fileSize) heuristic.
-    const byServer = new Map<string, AttachmentRecord>()
-    const localSeen = new Set<string>()
-    for (const a of list) {
-      if (a.deletedAt) continue
-      if (a.serverId) {
-        const existing = byServer.get(a.serverId)
-        if (!existing) byServer.set(a.serverId, a)
-        else {
-          // prefer one that has data cached
-          if (!!a.data && !existing.data) byServer.set(a.serverId, a)
-        }
-      } else {
-        const k = `${a.fileName}:${a.fileSize}`
-        if (!localSeen.has(k)) localSeen.add(k)
-      }
-    }
-    // Merge server-identified with local-only that don't conflict
-    const result: AttachmentRecord[] = []
-    byServer.forEach(v => result.push(v))
-    for (const a of list) {
-      if (a.deletedAt || a.serverId) continue
-      // if any server item matches by heuristic, skip
-      const conflict = result.some(x => x.fileName === a.fileName && x.fileSize === a.fileSize)
-      if (!conflict) result.push(a)
-    }
-    // Sort by modifiedAt ASC to match server ordering semantics
-    return result.sort((a, b) => (a.modifiedAt || '').localeCompare(b.modifiedAt || ''))
+    return attachmentsRepo.listDisplayForNote(noteId)
   }, [noteId]) ?? []) as AttachmentRecord[]
 
   const hasAny = attachments.length > 0
@@ -152,13 +125,12 @@ export default function NoteImages({ noteId }: { noteId: number }) {
   if (!hasAny) return null
 
   return (
-    <div className="mt-2">
+    <div>
       <div
-        className={`grid gap-1 rounded border border-neutral-800 overflow-hidden`}
+        className="grid gap-3"
         style={{
           gridTemplateColumns: `repeat(${layout.columns}, minmax(0, 1fr))`,
           gridTemplateRows: rowHeights.length ? rowHeights.map(h => `${Math.max(1, Math.round(h))}px`).join(' ') : undefined,
-          overflow: 'hidden',
         }}
         ref={containerRef}
       >
@@ -168,61 +140,64 @@ export default function NoteImages({ noteId }: { noteId: number }) {
       </div>
 
       {viewerIndex != null && (
-        <div
-          className="fixed inset-0 z-[60]"
-          onClick={() => setViewerIndex(null)}
-          onWheel={(e) => {
-            e.preventDefault()
-            // Debounce to approximate one step per wheel turn
-            if (wheelCooldownRef.current != null) return
-            wheelAccumRef.current += e.deltaY
-            const threshold = 80
-            if (wheelAccumRef.current >= threshold) {
-              setViewerIndex(i => (i != null && i < attachments.length - 1 ? i + 1 : i))
-              wheelAccumRef.current = 0
-              wheelCooldownRef.current = window.setTimeout(() => { wheelCooldownRef.current = null }, 200)
-            } else if (wheelAccumRef.current <= -threshold) {
-              setViewerIndex(i => (i != null && i > 0 ? i - 1 : i))
-              wheelAccumRef.current = 0
-              wheelCooldownRef.current = window.setTimeout(() => { wheelCooldownRef.current = null }, 200)
-            }
-          }}
-        >
-          <div className="absolute inset-0 bg-black/60" />
-          <div className="absolute inset-0 flex items-center justify-center p-4">
-            {attachments[viewerIndex]?.data ? (
-              <BlobImg
-                blob={attachments[viewerIndex]!.data as Blob}
-                alt={attachments[viewerIndex]?.fileName}
-                className="max-w-[95vw] max-h-[95vh] w-auto h-auto object-contain"
-                draggable={false}
-              />
-            ) : (
-              <div className="text-neutral-400">Loading…</div>
-            )}
-          </div>
+        createPortal(
+          <div
+            className="fixed inset-0 z-[200]"
+            onClick={() => setViewerIndex(null)}
+            onWheel={(e) => {
+              e.preventDefault()
+              // Debounce to approximate one step per wheel turn
+              if (wheelCooldownRef.current != null) return
+              wheelAccumRef.current += e.deltaY
+              const threshold = 80
+              if (wheelAccumRef.current >= threshold) {
+                setViewerIndex(i => (i != null && i < attachments.length - 1 ? i + 1 : i))
+                wheelAccumRef.current = 0
+                wheelCooldownRef.current = window.setTimeout(() => { wheelCooldownRef.current = null }, 200)
+              } else if (wheelAccumRef.current <= -threshold) {
+                setViewerIndex(i => (i != null && i > 0 ? i - 1 : i))
+                wheelAccumRef.current = 0
+                wheelCooldownRef.current = window.setTimeout(() => { wheelCooldownRef.current = null }, 200)
+              }
+            }}
+          >
+            <div className="absolute inset-0 bg-black/60" />
+            <div className="absolute inset-0 flex items-center justify-center p-4">
+              {attachments[viewerIndex]?.data ? (
+                <BlobImg
+                  blob={attachments[viewerIndex]!.data as Blob}
+                  alt={attachments[viewerIndex]?.fileName}
+                  className="max-w-[95vw] max-h-[95vh] w-auto h-auto object-contain"
+                  draggable={false}
+                />
+              ) : (
+                <div className="text-neutral-400">Loading…</div>
+              )}
+            </div>
 
-          {viewerIndex > 0 && (
-            <button
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-3xl px-3 py-2 bg-black/40 hover:bg-black/60 rounded"
-              type="button"
-              onClick={(e) => { e.stopPropagation(); setViewerIndex(i => (i != null && i > 0 ? i - 1 : i)) }}
-              aria-label="Previous image"
-            >
-              ←
-            </button>
-          )}
-          {viewerIndex < attachments.length - 1 && (
-            <button
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-3xl px-3 py-2 bg-black/40 hover:bg-black/60 rounded"
-              type="button"
-              onClick={(e) => { e.stopPropagation(); setViewerIndex(i => (i != null && i < attachments.length - 1 ? i + 1 : i)) }}
-              aria-label="Next image"
-            >
-              →
-            </button>
-          )}
-        </div>
+            {viewerIndex > 0 && (
+              <button
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-3xl px-3 py-2 bg-black/40 hover:bg-black/60 rounded"
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setViewerIndex(i => (i != null && i > 0 ? i - 1 : i)) }}
+                aria-label="Previous image"
+              >
+                ←
+              </button>
+            )}
+            {viewerIndex < attachments.length - 1 && (
+              <button
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-3xl px-3 py-2 bg-black/40 hover:bg-black/60 rounded"
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setViewerIndex(i => (i != null && i < attachments.length - 1 ? i + 1 : i)) }}
+                aria-label="Next image"
+              >
+                →
+              </button>
+            )}
+          </div>,
+          document.body,
+        )
       )}
     </div>
   )
@@ -253,8 +228,12 @@ function Cell({ span, att, refEl, onOpen }: { span?: { col?: number; row?: numbe
   return (
     <div
       ref={ref}
-      className="relative bg-neutral-900"
-      style={style}
+      className={['relative rounded-[15px] overflow-hidden', (att.data ? 'cursor-pointer hover:opacity-95' : '')].join(' ')}
+      style={{
+        ...style,
+        background: 'rgb(var(--c-surface))',
+        boxShadow: 'var(--shadow-waterdrop)',
+      }}
       onClick={() => { if (att.data && onOpen) onOpen() }}
       role={att.data ? 'button' : undefined}
       aria-label={att.data ? 'Open image' : undefined}
@@ -268,7 +247,7 @@ function Cell({ span, att, refEl, onOpen }: { span?: { col?: number; row?: numbe
           draggable={false}
         />
       ) : (
-        <div className="w-full h-full min-h-[120px] flex items-center justify-center text-neutral-500">Loading…</div>
+        <div className="w-full h-full min-h-[120px] flex items-center justify-center text-muted">Loading…</div>
       )}
     </div>
   )

@@ -24,9 +24,10 @@ export function isSupportedImage(file: File): boolean {
 export async function compressToWebP(file: File): Promise<CompressedImageResult> {
   if (!isSupportedImage(file)) throw new Error('Unsupported image type')
   const options: Options = {
-    maxSizeMB: 0.1, // ~100KB target
-    maxWidthOrHeight: 1024,
-    initialQuality: 0.65,
+    // Deterministic compression: fixed quality for all images
+    // maxSizeMB removed to prevent adaptive quality degradation
+    maxWidthOrHeight: 2048,
+    initialQuality: 0.65, // Fixed quality level for consistent visual output
     fileType: 'image/webp',
     alwaysKeepResolution: false,
     useWebWorker: true,

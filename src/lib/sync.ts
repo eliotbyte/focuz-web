@@ -1,6 +1,7 @@
 import { db, getKV, setKV, wipeLocalData, deleteDatabase, deleteDatabaseWithRetry, ensureDbOpen } from './db'
 import { parseDurationToMs } from './time'
 import type { FilterRecord, NoteRecord, SpaceRecord, TagRecord, AttachmentRecord, JobRecord, ActivityRecord, ActivityTypeRecord } from './types'
+import { markConflictsDetected, markJobFailed, setSyncError, setSyncing } from './app-state'
 
 const API_BASE = (import.meta as any).env.VITE_API_BASE_URL as string | undefined
 const BASE_SYNC_INTERVAL_MS = Number(((import.meta as any).env.VITE_SYNC_INTERVAL_MS ?? '60000')) || 60000
@@ -315,7 +316,7 @@ function toServerActivityValue(t: ActivityTypeRecord | undefined, raw: string): 
         const m = Math.floor((totalMs % 3600000) / 60000)
         const s = Math.floor((totalMs % 60000) / 1000)
         const msR = totalMs % 1000
-        let parts: string[] = []
+        const parts: string[] = []
         if (h) parts.push(`${h} hour${h !== 1 ? 's' : ''}`)
         if (m) parts.push(`${m} minute${m !== 1 ? 's' : ''}`)
         if (s || (!h && !m && !msR)) parts.push(`${s} second${s !== 1 ? 's' : ''}`)
@@ -389,6 +390,7 @@ export async function addLocalAttachment(noteId: number, file: File): Promise<nu
   const id = await db.attachments.add({
     noteId,
     serverId: null,
+    clientId: crypto.randomUUID(),
     fileName: file.name,
     fileType: file.type,
     fileSize: file.size,
@@ -488,10 +490,50 @@ function toTagChange(t: TagRecord) {
   }
 }
 
+function noteSnapshotForConflict(n: NoteRecord) {
+  return {
+    serverId: n.serverId ?? null,
+    clientId: n.clientId ?? null,
+    spaceId: n.spaceId,
+    title: n.title ?? null,
+    text: n.text,
+    tags: n.tags ?? [],
+    createdAt: n.createdAt,
+    modifiedAt: n.modifiedAt,
+    date: n.date,
+    parentId: n.parentId ?? null,
+    deletedAt: n.deletedAt ?? null,
+  }
+}
+
+async function recordNoteConflict(localNote: NoteRecord, conflict: any): Promise<void> {
+  const noteLocalId = localNote.id
+  const noteServerId = localNote.serverId
+  if (!noteLocalId || !noteServerId) return
+  // Avoid spamming duplicates: if there's already an unresolved conflict for this noteServerId, don't add another.
+  const existing = await db.noteConflicts.where('noteServerId').equals(noteServerId).and(x => x.isResolved === 0).first()
+  if (existing?.id) return
+  const now = new Date().toISOString()
+  await db.noteConflicts.add({
+    noteLocalId,
+    noteServerId,
+    reason: String(conflict?.reason ?? 'server-newer'),
+    local: noteSnapshotForConflict(localNote),
+    server: conflict?.server,
+    createdAt: now,
+    isResolved: 0,
+    resolvedAt: null,
+  } as any)
+}
+
 async function pushDirty() {
   if (!navigator.onLine || !API_BASE || !getAuthToken() || isAuthRequired()) return { applied: 0 }
 
-  const notes = await db.notes.where('isDirty').equals(1).toArray()
+  // Notes with unresolved conflicts stay dirty but are excluded from pushing until resolved (prevents repeated conflicts/spam).
+  const blockedNoteLocalIds = new Set<number>(
+    (await db.noteConflicts.where('isResolved').equals(0).toArray()).map(x => x.noteLocalId),
+  )
+  const notes = (await db.notes.where('isDirty').equals(1).toArray()).filter(n => !blockedNoteLocalIds.has(n.id!))
   const filters = await db.filters.where('isDirty').equals(1).toArray()
   const tags = await db.tags.where('isDirty').equals(1).toArray()
   const attachments = await db.attachments.where('isDirty').equals(1).toArray()
@@ -595,13 +637,50 @@ async function pushDirty() {
   })
 
   const mappings: Array<{ resource: string; clientId: string; serverId: number }> = resp?.data?.mappings ?? []
+  const conflicts: Array<{ resource?: string; id?: number; reason?: string; server?: any }> = resp?.data?.conflicts ?? []
+
+  const conflictedNoteServerIds = new Set<number>()
+  const conflictedFilterServerIds = new Set<number>()
+  const conflictedChartServerIds = new Set<number>()
+  const conflictedActivityServerIds = new Set<number>()
+  for (const c of conflicts) {
+    const rid = typeof c?.id === 'number' ? c.id : null
+    if (!rid) continue
+    const r = String(c?.resource ?? '').toLowerCase()
+    if (r === 'note' || r === 'notes') conflictedNoteServerIds.add(rid)
+    else if (r === 'filter' || r === 'filters') conflictedFilterServerIds.add(rid)
+    else if (r === 'chart' || r === 'charts') conflictedChartServerIds.add(rid)
+    else if (r === 'activity' || r === 'activities') conflictedActivityServerIds.add(rid)
+  }
 
   await db.transaction('rw', [db.notes, db.filters, db.tags, db.attachments, db.activities] as any, async () => {
-    for (const n of notesForSync) await db.notes.update(n.id!, { isDirty: 0 })
-    for (const f of filters) await db.filters.update(f.id!, { isDirty: 0 })
+    const conflictedNoteLocalIds = new Set<number>()
+    for (const n of notesForSync) {
+      const sid = n.serverId ?? null
+      if (sid && conflictedNoteServerIds.has(sid)) {
+        conflictedNoteLocalIds.add(n.id!)
+        const conflict = conflicts.find(x => String(x?.resource ?? '').toLowerCase() === 'note' && x?.id === sid)
+        await recordNoteConflict(n, conflict)
+        continue // keep dirty
+      }
+      await db.notes.update(n.id!, { isDirty: 0 })
+    }
+    for (const f of filters) {
+      const sid = f.serverId ?? null
+      if (sid && conflictedFilterServerIds.has(sid)) continue
+      await db.filters.update(f.id!, { isDirty: 0 })
+    }
     for (const t of tags) await db.tags.update(t.id!, { isDirty: 0 })
-    for (const a of attachments) await db.attachments.update(a.id!, { isDirty: 0 })
-    for (const a of activities) await db.activities.update(a.id!, { isDirty: 0 })
+    for (const a of attachments) {
+      // If the parent note is in conflict, server did NOT apply attachment edits (attachments are only processed when note wins LWW).
+      if (conflictedNoteLocalIds.has(a.noteId)) continue
+      await db.attachments.update(a.id!, { isDirty: 0 })
+    }
+    for (const a of activities) {
+      const sid = a.serverId ?? null
+      if (sid && conflictedActivityServerIds.has(sid)) continue
+      await db.activities.update(a.id!, { isDirty: 0 })
+    }
     for (const m of mappings) {
       if (m.resource === 'note' || m.resource === 'notes') {
         const local = await db.notes.where('clientId').equals(m.clientId).first()
@@ -636,6 +715,9 @@ async function pushDirty() {
     }
   })
 
+  // UI must not be called from sync module. Emit status event via app-state instead.
+  if (conflicts.length > 0) markConflictsDetected(conflicts.length)
+
   try { window.dispatchEvent(new Event('focuz:sync-applied')) } catch {}
 
   return { applied: resp?.data?.applied ?? 0 }
@@ -644,228 +726,242 @@ async function pushDirty() {
 async function pullSince() {
   if (!navigator.onLine || !API_BASE || !getAuthToken() || isAuthRequired()) return { pulled: 0 }
   const since = (await getKV<string>(LAST_SYNC_KV, '1970-01-01T00:00:00Z'))!
-  const resp = await api(`/sync?since=${encodeURIComponent(since)}`)
-  const data = resp?.data || {}
 
   // Advance checkpoint only to the max server modified_at we actually saw
   let maxSyncAt = since
   const updateMax = (iso?: string) => { if (iso && iso > maxSyncAt) maxSyncAt = iso }
-  for (const s of (data.spaces ?? [])) updateMax(s.modified_at)
-  for (const n of (data.notes ?? [])) updateMax(n.modified_at)
-  for (const t of (data.tags ?? [])) updateMax(t.modified_at ?? t.created_at)
-  for (const f of (data.filters ?? [])) updateMax(f.modified_at)
-  for (const at of (data.activityTypes ?? [])) updateMax(at.modified_at)
-  for (const n of (data.notes ?? [])) {
-    if (Array.isArray(n.attachments)) {
-      for (const a of n.attachments) updateMax(a.modified_at ?? a.created_at)
-    }
-    if (Array.isArray(n.activities)) {
-      for (const a of n.activities) updateMax(a.modified_at)
-    }
-  }
 
   let pulled = 0
-  await db.transaction('rw', [db.spaces, db.notes, db.tags, db.filters, db.attachments, db.activities, db.activityTypes, db.jobs] as any, async () => {
-    for (const s of (data.spaces ?? [])) {
-      pulled++
-      const existing = await db.spaces.where('serverId').equals(s.id).first()
-      const rec: SpaceRecord = {
-        id: existing?.id,
-        serverId: s.id,
-        name: s.name,
-        createdAt: s.created_at,
-        modifiedAt: s.modified_at,
-        deletedAt: s.deleted_at ?? null,
-        isDirty: 0,
-      }
-      if (existing) await db.spaces.put(rec)
-      else await db.spaces.add(rec)
-    }
+  let cursor: string | null = null
+  // Hard safety cap to avoid infinite loops if the server ever misbehaves.
+  for (let page = 0; page < 50; page++) {
+    const qs = new URLSearchParams({ since })
+    if (cursor) qs.set('cursor', cursor)
+    const resp = await api(`/sync?${qs.toString()}`)
+    const data = resp?.data || {}
 
+    for (const s of (data.spaces ?? [])) updateMax(s.modified_at)
+    for (const n of (data.notes ?? [])) updateMax(n.modified_at)
+    for (const t of (data.tags ?? [])) updateMax(t.modified_at ?? t.created_at)
+    for (const f of (data.filters ?? [])) updateMax(f.modified_at)
+    for (const at of (data.activityTypes ?? [])) updateMax(at.modified_at)
     for (const n of (data.notes ?? [])) {
-      pulled++
-      let existing = await db.notes.where('serverId').equals(n.id!).first()
-      if (!existing && n.clientId) {
-        // try match by clientId if provided from server (conflict/mapping echo)
-        existing = await db.notes.where('clientId').equals(n.clientId).first()
+      if (Array.isArray(n.attachments)) {
+        for (const a of n.attachments) updateMax(a.modified_at ?? a.created_at)
       }
-      const rec: NoteRecord = {
-        id: existing?.id,
-        serverId: n.id ?? null,
-        clientId: existing?.clientId ?? n.clientId ?? null,
-        spaceId: (await db.spaces.where('serverId').equals(n.space_id).first())?.id!,
-        title: null,
-        text: n.text ?? '',
-        tags: n.tags ?? [],
-        createdAt: n.created_at,
-        modifiedAt: n.modified_at,
-        date: n.date ?? n.created_at,
-        parentId: n.parent_id ?? null,
-        deletedAt: n.deleted_at ?? null,
-        isDirty: 0,
-      }
-      if (existing) await db.notes.put(rec)
-      else await db.notes.add(rec)
-    }
-
-    for (const t of (data.tags ?? [])) {
-      pulled++
-      const existing = await db.tags.where('serverId').equals(t.id).first()
-      const rec: TagRecord = {
-        id: existing?.id,
-        serverId: t.id,
-        spaceId: (await db.spaces.where('serverId').equals(t.space_id).first())?.id!,
-        name: t.name,
-        createdAt: t.created_at,
-        modifiedAt: t.modified_at,
-        deletedAt: t.deleted_at ?? null,
-        isDirty: 0,
-      }
-      if (existing) await db.tags.put(rec)
-      else await db.tags.add(rec)
-    }
-
-    for (const f of (data.filters ?? [])) {
-      pulled++
-      const existing = await db.filters.where('serverId').equals(f.id).first()
-      const rec: FilterRecord = {
-        id: existing?.id,
-        serverId: f.id,
-        spaceId: (await db.spaces.where('serverId').equals(f.space_id).first())?.id!,
-        parentId: f.parent_id ?? null,
-        name: f.name,
-        params: (f.params ?? {}) as any,
-        createdAt: f.created_at,
-        modifiedAt: f.modified_at,
-        deletedAt: f.deleted_at ?? null,
-        isDirty: 0,
-      }
-      if (existing) await db.filters.put(rec)
-      else await db.filters.add(rec)
-    }
-
-    // Activity Types
-    for (const t of (data.activityTypes ?? [])) {
-      pulled++
-      const existing = await db.activityTypes.where('serverId').equals(t.id).first()
-      let spaceLocalId = 0
-      if (typeof t.space_id === 'number') {
-        const s = await db.spaces.where('serverId').equals(t.space_id).first()
-        spaceLocalId = s?.id ?? 0
-      }
-      const rec: ActivityTypeRecord = {
-        id: existing?.id,
-        serverId: t.id,
-        spaceId: spaceLocalId,
-        name: t.name,
-        valueType: (t.value_type || t.valueType) as any,
-        minValue: typeof t.min_value === 'number' ? t.min_value : (typeof t.minValue === 'number' ? t.minValue : null),
-        maxValue: typeof t.max_value === 'number' ? t.max_value : (typeof t.maxValue === 'number' ? t.maxValue : null),
-        aggregation: (t.aggregation ?? null),
-        unit: (t.unit ?? null),
-        categoryId: (t.category_id ?? t.categoryId ?? null),
-        createdAt: t.created_at,
-        modifiedAt: t.modified_at,
-        deletedAt: t.deleted_at ?? null,
-      }
-      if (existing) await db.activityTypes.put(rec)
-      else await db.activityTypes.add(rec)
-    }
-
-    const upsertAttachment = async (a: any) => {
-      pulled++
-      const existing = await db.attachments.where('serverId').equals(a.id).first()
-      const noteLocalId = (await db.notes.where('serverId').equals(a.note_id).first())?.id
-      if (!noteLocalId) return
-      const rec: AttachmentRecord = {
-        id: existing?.id,
-        serverId: a.id,
-        noteId: noteLocalId,
-        fileName: a.file_name,
-        fileType: a.file_type,
-        fileSize: a.file_size,
-        data: existing?.data ?? null,
-        createdAt: a.created_at,
-        modifiedAt: a.modified_at,
-        deletedAt: null,
-        isDirty: 0,
-      }
-      const attId = existing ? (await db.attachments.put(rec)) : (await db.attachments.add(rec))
-      // remove any local duplicates for the same note with same fileName+fileSize and null serverId
-      const dups = await db.attachments.where('noteId').equals(noteLocalId).filter(x => !x.serverId && x.fileName === rec.fileName && x.fileSize === rec.fileSize).toArray()
-      for (const d of dups) {
-        if (!rec.data && d.data) {
-          await db.attachments.update(attId, { data: d.data })
-        }
-        await db.attachments.delete(d.id!)
+      if (Array.isArray(n.activities)) {
+        for (const a of n.activities) updateMax(a.modified_at)
       }
     }
 
-    // Top-level attachments removed in new API; rely on per-note attachments
-    for (const n of (data.notes ?? [])) {
-      for (const a of (n.attachments ?? [])) {
-        // include parent note id if not present
-        a.note_id = a.note_id ?? n.id
-        await upsertAttachment(a)
-      }
-      // Upsert activities nested under notes with deduplication against local drafts
-      for (const a of (n.activities ?? [])) {
+    await db.transaction('rw', [db.spaces, db.notes, db.tags, db.filters, db.attachments, db.activities, db.activityTypes, db.jobs] as any, async () => {
+      for (const s of (data.spaces ?? [])) {
         pulled++
-        const noteLocalId = (await db.notes.where('serverId').equals(n.id).first())?.id
-        if (!noteLocalId) continue
-
-        const existingByServer = (typeof a.id === 'number')
-          ? (await db.activities.where('serverId').equals(a.id).first())
-          : null
-        const localDup = await db.activities
-          .where('noteId').equals(noteLocalId)
-          .filter(x => !x.serverId && !x.deletedAt && x.typeId === a.type_id)
-          .first()
-
-        const rec: ActivityRecord = {
-          id: existingByServer?.id ?? localDup?.id,
-          serverId: (typeof a.id === 'number' ? a.id : null),
-          noteId: noteLocalId,
-          typeId: a.type_id,
-          valueRaw: fromServerActivityValue(a.value),
-          createdAt: a.created_at,
-          modifiedAt: a.modified_at,
-          deletedAt: a.deleted_at ?? null,
+        const existing = await db.spaces.where('serverId').equals(s.id).first()
+        const rec: SpaceRecord = {
+          id: existing?.id,
+          serverId: s.id,
+          name: s.name,
+          createdAt: s.created_at,
+          modifiedAt: s.modified_at,
+          deletedAt: s.deleted_at ?? null,
           isDirty: 0,
         }
+        if (existing) await db.spaces.put(rec)
+        else await db.spaces.add(rec)
+      }
 
-        if (existingByServer && localDup && existingByServer.id !== localDup.id) {
-          // Prefer server-backed record; update it and remove local duplicate
-          await db.activities.put({ ...rec, id: existingByServer.id })
-          await db.activities.delete(localDup.id!)
-        } else if (localDup && !existingByServer) {
-          // Promote local draft to server-backed by assigning serverId and server fields
-          await db.activities.put(rec)
-        } else if (existingByServer) {
-          await db.activities.put({ ...rec, id: existingByServer.id })
-        } else {
-          await db.activities.add(rec)
+      for (const n of (data.notes ?? [])) {
+        pulled++
+        let existing = await db.notes.where('serverId').equals(n.id!).first()
+        if (!existing && n.clientId) {
+          // try match by clientId if provided from server (conflict/mapping echo)
+          existing = await db.notes.where('clientId').equals(n.clientId).first()
         }
+        const rec: NoteRecord = {
+          id: existing?.id,
+          serverId: n.id ?? null,
+          clientId: existing?.clientId ?? n.clientId ?? null,
+          spaceId: (await db.spaces.where('serverId').equals(n.space_id).first())?.id!,
+          title: null,
+          text: n.text ?? '',
+          tags: n.tags ?? [],
+          createdAt: n.created_at,
+          modifiedAt: n.modified_at,
+          date: n.date ?? n.created_at,
+          parentId: n.parent_id ?? null,
+          deletedAt: n.deleted_at ?? null,
+          isDirty: 0,
+        }
+        if (existing) await db.notes.put(rec)
+        else await db.notes.add(rec)
+      }
 
-        // Ensure only one activity per (noteId, typeId): remove any extras keeping the best candidate
-        const allOfType = await db.activities
-          .where('noteId').equals(noteLocalId)
-          .filter(x => !x.deletedAt && x.typeId === a.type_id)
-          .toArray()
-        if (allOfType.length > 1) {
-          // Choose winner: prefer with serverId; tie-breaker by latest modifiedAt
-          let winner = allOfType[0]
-          for (const it of allOfType.slice(1)) {
-            const prefer = (Number(!!it.serverId) - Number(!!winner.serverId)) || ((it.modifiedAt || '').localeCompare(winner.modifiedAt || ''))
-            if (prefer > 0) winner = it
+      for (const t of (data.tags ?? [])) {
+        pulled++
+        const existing = await db.tags.where('serverId').equals(t.id).first()
+        const rec: TagRecord = {
+          id: existing?.id,
+          serverId: t.id,
+          spaceId: (await db.spaces.where('serverId').equals(t.space_id).first())?.id!,
+          name: t.name,
+          createdAt: t.created_at,
+          modifiedAt: t.modified_at,
+          deletedAt: t.deleted_at ?? null,
+          isDirty: 0,
+        }
+        if (existing) await db.tags.put(rec)
+        else await db.tags.add(rec)
+      }
+
+      for (const f of (data.filters ?? [])) {
+        pulled++
+        const existing = await db.filters.where('serverId').equals(f.id).first()
+        const rec: FilterRecord = {
+          id: existing?.id,
+          serverId: f.id,
+          spaceId: (await db.spaces.where('serverId').equals(f.space_id).first())?.id!,
+          parentId: f.parent_id ?? null,
+          name: f.name,
+          params: (f.params ?? {}) as any,
+          createdAt: f.created_at,
+          modifiedAt: f.modified_at,
+          deletedAt: f.deleted_at ?? null,
+          isDirty: 0,
+        }
+        if (existing) await db.filters.put(rec)
+        else await db.filters.add(rec)
+      }
+
+      // Activity Types
+      for (const t of (data.activityTypes ?? [])) {
+        pulled++
+        const existing = await db.activityTypes.where('serverId').equals(t.id).first()
+        let spaceLocalId = 0
+        if (typeof t.space_id === 'number') {
+          const s = await db.spaces.where('serverId').equals(t.space_id).first()
+          spaceLocalId = s?.id ?? 0
+        }
+        const rec: ActivityTypeRecord = {
+          id: existing?.id,
+          serverId: t.id,
+          spaceId: spaceLocalId,
+          name: t.name,
+          valueType: (t.value_type || t.valueType) as any,
+          minValue: typeof t.min_value === 'number' ? t.min_value : (typeof t.minValue === 'number' ? t.minValue : null),
+          maxValue: typeof t.max_value === 'number' ? t.max_value : (typeof t.maxValue === 'number' ? t.maxValue : null),
+          aggregation: (t.aggregation ?? null),
+          unit: (t.unit ?? null),
+          categoryId: (t.category_id ?? t.categoryId ?? null),
+          createdAt: t.created_at,
+          modifiedAt: t.modified_at,
+          deletedAt: t.deleted_at ?? null,
+        }
+        if (existing) await db.activityTypes.put(rec)
+        else await db.activityTypes.add(rec)
+      }
+
+      const upsertAttachment = async (a: any) => {
+        pulled++
+        const existing = await db.attachments.where('serverId').equals(a.id).first()
+        const noteLocalId = (await db.notes.where('serverId').equals(a.note_id).first())?.id
+        if (!noteLocalId) return
+        const rec: AttachmentRecord = {
+          id: existing?.id,
+          serverId: a.id,
+          noteId: noteLocalId,
+          fileName: a.file_name,
+          fileType: a.file_type,
+          fileSize: a.file_size,
+          data: existing?.data ?? null,
+          createdAt: a.created_at,
+          modifiedAt: a.modified_at,
+          deletedAt: null,
+          isDirty: 0,
+        }
+        const attId = existing ? (await db.attachments.put(rec)) : (await db.attachments.add(rec))
+        // remove any local duplicates for the same note with same fileName+fileSize and null serverId
+        const dups = await db.attachments.where('noteId').equals(noteLocalId).filter(x => !x.serverId && x.fileName === rec.fileName && x.fileSize === rec.fileSize).toArray()
+        for (const d of dups) {
+          if (!rec.data && d.data) {
+            await db.attachments.update(attId, { data: d.data })
           }
-          for (const it of allOfType) {
-            if (it.id !== winner.id) await db.activities.delete(it.id!)
+          await db.attachments.delete(d.id!)
+        }
+      }
+
+      // Top-level attachments removed in new API; rely on per-note attachments
+      for (const n of (data.notes ?? [])) {
+        for (const a of (n.attachments ?? [])) {
+          // include parent note id if not present
+          a.note_id = a.note_id ?? n.id
+          await upsertAttachment(a)
+        }
+        // Upsert activities nested under notes with deduplication against local drafts
+        for (const a of (n.activities ?? [])) {
+          pulled++
+          const noteLocalId = (await db.notes.where('serverId').equals(n.id).first())?.id
+          if (!noteLocalId) continue
+
+          const existingByServer = (typeof a.id === 'number')
+            ? (await db.activities.where('serverId').equals(a.id).first())
+            : null
+          const localDup = await db.activities
+            .where('noteId').equals(noteLocalId)
+            .filter(x => !x.serverId && !x.deletedAt && x.typeId === a.type_id)
+            .first()
+
+          const rec: ActivityRecord = {
+            id: existingByServer?.id ?? localDup?.id,
+            serverId: (typeof a.id === 'number' ? a.id : null),
+            noteId: noteLocalId,
+            typeId: a.type_id,
+            valueRaw: fromServerActivityValue(a.value),
+            createdAt: a.created_at,
+            modifiedAt: a.modified_at,
+            deletedAt: a.deleted_at ?? null,
+            isDirty: 0,
+          }
+
+          if (existingByServer && localDup && existingByServer.id !== localDup.id) {
+            // Prefer server-backed record; update it and remove local duplicate
+            await db.activities.put({ ...rec, id: existingByServer.id })
+            await db.activities.delete(localDup.id!)
+          } else if (localDup && !existingByServer) {
+            // Promote local draft to server-backed by assigning serverId and server fields
+            await db.activities.put(rec)
+          } else if (existingByServer) {
+            await db.activities.put({ ...rec, id: existingByServer.id })
+          } else {
+            await db.activities.add(rec)
+          }
+
+          // Ensure only one activity per (noteId, typeId): remove any extras keeping the best candidate
+          const allOfType = await db.activities
+            .where('noteId').equals(noteLocalId)
+            .filter(x => !x.deletedAt && x.typeId === a.type_id)
+            .toArray()
+          if (allOfType.length > 1) {
+            // Choose winner: prefer with serverId; tie-breaker by latest modifiedAt
+            let winner = allOfType[0]
+            for (const it of allOfType.slice(1)) {
+              const prefer = (Number(!!it.serverId) - Number(!!winner.serverId)) || ((it.modifiedAt || '').localeCompare(winner.modifiedAt || ''))
+              if (prefer > 0) winner = it
+            }
+            for (const it of allOfType) {
+              if (it.id !== winner.id) await db.activities.delete(it.id!)
+            }
           }
         }
       }
-    }
-  })
+    })
+
+    const hasMore = !!data.hasMore
+    const nextCursor = (typeof data.nextCursor === 'string' && data.nextCursor) ? data.nextCursor : null
+    if (!hasMore) break
+    if (!nextCursor) break // future-proofing: avoid infinite loop if server sends partial without cursor
+    cursor = nextCursor
+  }
 
   await setKV(LAST_SYNC_KV, maxSyncAt)
 
@@ -898,6 +994,7 @@ export async function runSync(force = false): Promise<void> {
   if (!force && now < backoffUntilMs) return
   if (syncRunning) { syncQueued = true; return }
   syncRunning = true
+  setSyncing(true)
   try {
     const pushed = await pushDirty()
     const pulled = await pullSince()
@@ -907,8 +1004,15 @@ export async function runSync(force = false): Promise<void> {
     } else {
       backoffUntilMs = 0
     }
+    setSyncError(null)
+  } catch (e: any) {
+    const msg = (e?.message || '').toString()
+    // Keep AUTH_REQUIRED as state, but still record as a sync error for debug/UX.
+    setSyncError(msg || 'Sync failed')
+    throw e
   } finally {
     syncRunning = false
+    setSyncing(false)
     if (syncQueued) {
       syncQueued = false
       setTimeout(() => runSync(), 0)
@@ -920,18 +1024,18 @@ export function scheduleAutoSync() {
   stopRequested = false
   const kick = () => {
     if (syncTimer) window.clearTimeout(syncTimer)
-    syncTimer = window.setTimeout(() => runSync(true), DEBOUNCE_LOCAL_MS)
+    syncTimer = window.setTimeout(() => { void runSync(true).catch(() => {}) }, DEBOUNCE_LOCAL_MS)
   }
 
-  onOnline = () => runSync()
-  onFocus = () => { runSync() }
-  onVisibilityChange = () => { if (document.visibilityState === 'visible') { runSync() } }
+  onOnline = () => { void runSync().catch(() => {}) }
+  onFocus = () => { void runSync().catch(() => {}) }
+  onVisibilityChange = () => { if (document.visibilityState === 'visible') { void runSync().catch(() => {}) } }
   window.addEventListener('online', onOnline)
   window.addEventListener('focus', onFocus)
   document.addEventListener('visibilitychange', onVisibilityChange)
 
   // Periodic baseline sync
-  baselineIntervalId = window.setInterval(() => runSync(), BASE_SYNC_INTERVAL_MS)
+  baselineIntervalId = window.setInterval(() => { void runSync().catch(() => {}) }, BASE_SYNC_INTERVAL_MS)
 
   // Best-effort websocket to get nudges from server when other sessions push
   const connectWS = () => {
@@ -949,7 +1053,7 @@ export function scheduleAutoSync() {
         const now = Date.now()
         if (now - lastWSTriggerMs < WS_COOLDOWN_MS) return
         lastWSTriggerMs = now
-        runSync()
+        void runSync().catch(() => {})
       }
       ws.onclose = () => {
         ws = null
@@ -986,19 +1090,35 @@ export function scheduleAutoSync() {
 async function processOneJob(): Promise<boolean> {
   if (stopRequested) return false
   if (!navigator.onLine || isAuthRequired() || !getAuthToken()) return false
-  const job = await db.jobs.orderBy('priority').first()
+  // Only one worker should process a job at a time; treat non-running jobs as retryable.
+  const job = await db.jobs
+    .orderBy('priority')
+    .filter(j => j.status !== 'running')
+    .first()
   if (!job) return false
-  await db.jobs.update(job.id!, { status: 'running', updatedAt: new Date().toISOString() })
+  const claimAt = new Date().toISOString()
+  // Atomically claim the job (best-effort across tabs/instances).
+  const claimed = await db.jobs
+    .where('id')
+    .equals(job.id!)
+    .and(j => j.status !== 'running')
+    .modify({ status: 'running', updatedAt: claimAt })
+  if (!claimed) return false
   try {
     if (job.kind === 'attachment-upload') {
       const att = await db.attachments.get(job.attachmentId)
       if (!att || att.deletedAt) throw new Error('Attachment missing')
       const note = await db.notes.get(att.noteId)
-      if (!note?.serverId) return false // wait until note mapped to server
+      if (!note?.serverId) {
+        // Wait until note is mapped to server; keep job retryable.
+        await db.jobs.update(job.id!, { status: 'pending', updatedAt: new Date().toISOString() })
+        return false
+      }
       const form = new FormData()
       const blob = (att.data as Blob) || new Blob()
       form.append('file', blob, att.fileName)
       form.append('note_id', String(note.serverId))
+      if (att.clientId) form.append('client_id', att.clientId)
       const resp = await apiMultipart('/upload', form)
       const serverId = (resp?.data?.attachment_id as string | undefined) || (resp?.data?.id as string | undefined)
       await db.transaction('rw', db.attachments, async () => {
@@ -1037,10 +1157,14 @@ async function processOneJob(): Promise<boolean> {
       await db.attachments.update(att.id!, { data: blob, modifiedAt: new Date().toISOString() })
     }
     await db.jobs.delete(job.id!)
+    try { window.dispatchEvent(new Event('focuz:jobs-changed')) } catch {}
     return true
-  } catch (e) {
+  } catch (e: any) {
     const attempts = (job.attempts ?? 0) + 1
     await db.jobs.update(job.id!, { status: 'failed', attempts, updatedAt: new Date().toISOString() })
+    try { window.dispatchEvent(new Event('focuz:jobs-changed')) } catch {}
+    // UI should react via app-state only.
+    try { markJobFailed(job.kind, e?.message || null) } catch {}
     return false
   }
 }

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '../lib/db'
+import { activityTypes as activityTypesRepo } from '../data'
 import { parseDurationToMs, formatDurationShort } from '../lib/time'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from './ui/dropdown-menu'
 
 export type ActivityDraft = { typeId: number; valueRaw: string }
 
@@ -33,16 +34,16 @@ export default function ActivitiesInput({
   const rootRef = useRef<HTMLDivElement | null>(null)
 
   const activityTypes = (useLiveQuery(async () => {
-    const types = await db.activityTypes.toArray()
-    const filtered = spaceId != null
-      ? types.filter(t => (t.spaceId === spaceId || t.spaceId === 0 || t.spaceId == null) && !t.deletedAt)
-      : types.filter(t => !t.deletedAt)
-    filtered.sort((a, b) => a.name.localeCompare(b.name))
-    return filtered
+    return activityTypesRepo.listForSpace(spaceId)
   }, [spaceId]) || [])
 
   const byId = useMemo(() => new Map(activityTypes.map(t => [t.serverId!, t])), [activityTypes])
   const items = value
+
+  const availableTypes = useMemo(() => {
+    const existing = new Set(items.map(i => i.typeId))
+    return activityTypes.filter(t => !existing.has(t.serverId!))
+  }, [activityTypes, JSON.stringify(items.map(i => i.typeId))])
 
   function clampNumber(v: number, min?: number | null, max?: number | null): number {
     let out = v
@@ -52,18 +53,18 @@ export default function ActivitiesInput({
   }
 
   function sanitizeIntegerInput(raw: string, allowMinus: boolean): string {
-    let s = raw.replace(/[^0-9\-]/g, '')
-    if (!allowMinus) s = s.replace(/\-/g, '')
+    let s = raw.replace(/[^0-9-]/g, '')
+    if (!allowMinus) s = s.replace(/-/g, '')
     // keep only leading minus
-    if (s.indexOf('-') > 0) s = s.replace(/\-/g, '')
+    if (s.indexOf('-') > 0) s = s.replace(/-/g, '')
     return s
   }
 
   function sanitizeFloatInput(raw: string, allowMinus: boolean): string {
-    let s = raw.replace(/[^0-9\-.]/g, '')
-    if (!allowMinus) s = s.replace(/\-/g, '')
+    let s = raw.replace(/[^0-9-.]/g, '')
+    if (!allowMinus) s = s.replace(/-/g, '')
     // keep only leading minus
-    if (s.indexOf('-') > 0) s = s.replace(/\-/g, '')
+    if (s.indexOf('-') > 0) s = s.replace(/-/g, '')
     // keep only first dot
     const firstDot = s.indexOf('.')
     if (firstDot !== -1) {
@@ -164,6 +165,29 @@ export default function ActivitiesInput({
       setEditingIdx(next.length - 1)
       setTimeout(() => inputRef.current?.focus(), 0)
     }
+  }
+
+  if (menuOnly) {
+    return (
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger>
+          Activity
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent className="w-56" data-actmenu="1">
+          <div className="max-h-60 overflow-auto">
+            {availableTypes.length === 0 ? (
+              <DropdownMenuItem disabled>All activities added</DropdownMenuItem>
+            ) : (
+              availableTypes.map(t => (
+                <DropdownMenuItem key={t.serverId!} onSelect={() => addType(t.serverId!)}>
+                  {t.name}
+                </DropdownMenuItem>
+              ))
+            )}
+          </div>
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+    )
   }
 
   return (
@@ -318,31 +342,24 @@ export default function ActivitiesInput({
         )
       })()}
       {!hideAddButton && activityTypes.length > 0 && (
-        <div className="inline-block relative" data-actmenu="1">
-          <button type="button" className="button" onClick={() => setMenuOpen(v => !v)}>Activity ▸</button>
-          {menuOpen && (
-            <div className="absolute z-10 mt-1 w-44 card p-1">
-              <div className="max-h-48 overflow-auto">
-                {(() => {
-                  const existing = new Set(items.map(i => i.typeId))
-                  const available = activityTypes.filter(t => !existing.has(t.serverId!))
-                  if (available.length === 0) {
-                    return (
-                      <div className="px-2 py-1 text-xs text-neutral-500">All activities added</div>
-                    )
-                  }
-                  return available.map(t => (
-                    <button key={t.serverId!}
-                      type="button"
-                      className="w-full text-left px-2 py-1 rounded hover:bg-neutral-800"
-                      onClick={() => addType(t.serverId!)}
-                    >{t.name}</button>
-                  ))
-                })()}
-              </div>
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <button type="button" className="button" data-actmenu="1">Activity ▾</button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent className="w-56" data-actmenu="1" align="start">
+            <div className="max-h-60 overflow-auto">
+              {availableTypes.length === 0 ? (
+                <DropdownMenuItem disabled>All activities added</DropdownMenuItem>
+              ) : (
+                availableTypes.map(t => (
+                  <DropdownMenuItem key={t.serverId!} onSelect={() => addType(t.serverId!)}>
+                    {t.name}
+                  </DropdownMenuItem>
+                ))
+              )}
             </div>
-          )}
-        </div>
+          </DropdownMenuContent>
+        </DropdownMenu>
       )}
     </div>
   )

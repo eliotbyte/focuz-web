@@ -129,6 +129,8 @@ workbox-*.js
 
 # TypeScript
 *.tsbuildinfo
+ts-trace.txt
+ts-trace*.txt
 
 # Misc
 *.swp
