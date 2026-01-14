@@ -13,6 +13,20 @@ import type {
   JobRecord,
 } from './types'
 
+const REQUIRED_STORES = [
+  'spaces',
+  'notes',
+  'noteConflicts',
+  'tags',
+  'filters',
+  'activities',
+  'activityTypes',
+  'charts',
+  'meta',
+  'attachments',
+  'jobs',
+] as const
+
 class AppDatabase extends Dexie {
   spaces!: Table<SpaceRecord, number>
   notes!: Table<NoteRecord, number>
@@ -132,6 +146,17 @@ class AppDatabase extends Dexie {
 
 export let db = new AppDatabase()
 
+function missingStores(): string[] {
+  try {
+    const idb = (db as any).backendDB?.() as IDBDatabase | undefined
+    if (!idb) return []
+    const existing = new Set(Array.from(idb.objectStoreNames))
+    return REQUIRED_STORES.filter(s => !existing.has(s))
+  } catch {
+    return []
+  }
+}
+
 export async function getKV<T = string>(key: string, fallback?: T): Promise<T | undefined> {
   const row = await db.meta.get(key)
   if (!row) return fallback
@@ -195,17 +220,31 @@ export async function deleteDatabaseWithRetry(timeoutMs = 5000): Promise<void> {
 }
 
 export async function ensureDbOpen(): Promise<void> {
-  try {
-    // Dexie has isOpen(); guard for typings
-    const isOpen = typeof (db as any).isOpen === 'function' ? (db as any).isOpen() : true
-    if (isOpen) return
-  } catch {}
-  try {
+  // Dexie opens lazily; we force open here and also validate the *actual* IndexedDB object stores.
+  // This protects users after deployments when an old DB schema is still present (or an upgrade was blocked),
+  // which would otherwise throw: "Failed to execute 'objectStore' on 'IDBTransaction'".
+  const openAndValidate = async () => {
     await db.open()
+    const missing = missingStores()
+    if (missing.length > 0) throw new Error(`DB_SCHEMA_MISSING_STORES:${missing.join(',')}`)
+  }
+
+  try {
+    await openAndValidate()
     return
   } catch {
+    // First try: close and recreate Dexie instance (should trigger upgrade without data loss).
     try { db.close() } catch {}
     db = new AppDatabase()
-    await db.open()
+    try {
+      await openAndValidate()
+      return
+    } catch {
+      // Last resort: drop DB and recreate (data may be lost, but avoids a broken offline state loop).
+      try { await deleteDatabaseWithRetry(5000) } catch {}
+      try { db.close() } catch {}
+      db = new AppDatabase()
+      await db.open()
+    }
   }
 }

@@ -993,6 +993,9 @@ export async function runSync(force = false): Promise<void> {
   const now = Date.now()
   if (!force && now < backoffUntilMs) return
   if (syncRunning) { syncQueued = true; return }
+  // Ensure IndexedDB is opened and schema is valid before any sync transactions.
+  // This prevents "objectStore was not found" loops after deployments.
+  await ensureDbOpen().catch(() => {})
   syncRunning = true
   setSyncing(true)
   try {
