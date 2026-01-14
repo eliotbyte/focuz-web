@@ -49,8 +49,9 @@ export default function NoteEditor({
   const textRef = useRef<HTMLTextAreaElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [attachments, setAttachments] = useState<File[]>([])
-  const allowActivities = mode === 'edit' ? true : featureFlags.noteCreateAddActivity
-  const [activities, setActivities] = useState<ActivityDraft[]>(allowActivities ? (value.activities || []) : [])
+  const allowActivitiesInline = mode === 'edit' ? true : featureFlags.noteCreateAddActivity
+  const allowActivitiesInAddMenu = mode === 'edit' ? featureFlags.noteCreateAddActivity : allowActivitiesInline
+  const [activities, setActivities] = useState<ActivityDraft[]>(allowActivitiesInline ? (value.activities || []) : [])
   const [editRequestTypeId, setEditRequestTypeId] = useState<number | null>(null)
 
   // Existing attachments for edit mode
@@ -78,10 +79,10 @@ export default function NoteEditor({
 
   // Hard gate: never keep activities drafts in production for create/reply.
   useEffect(() => {
-    if (allowActivities) return
+    if (allowActivitiesInline) return
     if (Array.isArray(value.activities) && value.activities.length > 0) onChange({ ...value, activities: [] })
     if (activities.length > 0) setActivities([])
-  }, [allowActivities])
+  }, [allowActivitiesInline])
 
   // Prefill activities for edit mode from DB if not provided (deduplicated per typeId)
   const existingActivities = (useLiveQuery(async () => {
@@ -127,7 +128,7 @@ export default function NoteEditor({
         onChange={e => onChange({ ...value, text: e.target.value })}
         onInput={e => autoResize(e.currentTarget)}
       />
-      {allowActivities ? (
+      {allowActivitiesInline ? (
         <ActivitiesInput
           value={activities}
           onChange={(acts) => { setActivities(acts); onChange({ ...value, activities: acts }) }}
@@ -254,7 +255,7 @@ export default function NoteEditor({
               >
                 Photo
               </DropdownMenuItem>
-              {allowActivities ? (
+              {allowActivitiesInAddMenu ? (
                 <>
                   <DropdownMenuSeparator />
                 <ActivitiesInput

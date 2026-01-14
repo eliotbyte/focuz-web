@@ -151,7 +151,8 @@ function AuthScreen({ onDone }: { onDone: () => void }) {
         else if (raw === 'Passwords do not match') setRegisterError('Passwords do not match')
         else setRegisterError(raw || 'Registration failed')
       } else {
-        setLoginError(raw || 'Sign in failed')
+        if (raw.startsWith('401')) setLoginError('Incorrect login or password')
+        else setLoginError(raw || 'Sign in failed')
       }
     } finally {
       setLoading(false)
