@@ -16,8 +16,10 @@ const AUTH_REQUIRED_LS = 'authRequired'
 
 let authRequired = false
 let authBC: BroadcastChannel | null = null
+let syncBC: BroadcastChannel | null = null
 try {
   authBC = new BroadcastChannel('focuz-auth')
+  syncBC = new BroadcastChannel('focuz-sync')
 } catch {}
 
 function emitAuthRequired(next: boolean) {
@@ -653,7 +655,7 @@ async function pushDirty() {
     else if (r === 'activity' || r === 'activities') conflictedActivityServerIds.add(rid)
   }
 
-  await db.transaction('rw', [db.notes, db.filters, db.tags, db.attachments, db.activities] as any, async () => {
+  await db.transaction('rw', [db.notes, db.noteConflicts, db.filters, db.tags, db.attachments, db.activities] as any, async () => {
     const conflictedNoteLocalIds = new Set<number>()
     for (const n of notesForSync) {
       const sid = n.serverId ?? null
@@ -754,7 +756,7 @@ async function pullSince() {
       }
     }
 
-    await db.transaction('rw', [db.spaces, db.notes, db.tags, db.filters, db.attachments, db.activities, db.activityTypes, db.jobs] as any, async () => {
+    await db.transaction('rw', [db.spaces, db.notes, db.noteConflicts, db.tags, db.filters, db.attachments, db.activities, db.activityTypes, db.jobs] as any, async () => {
       for (const s of (data.spaces ?? [])) {
         pulled++
         const existing = await db.spaces.where('serverId').equals(s.id).first()
@@ -777,6 +779,24 @@ async function pullSince() {
         if (!existing && n.clientId) {
           // try match by clientId if provided from server (conflict/mapping echo)
           existing = await db.notes.where('clientId').equals(n.clientId).first()
+        }
+        // Additional deduplication: check for notes with same serverId that might have been created in parallel
+        if (!existing && n.id) {
+          const duplicates = await db.notes.where('serverId').equals(n.id).toArray()
+          if (duplicates.length > 0) {
+            // Keep the one with the latest modifiedAt or the one with clientId
+            existing = duplicates.reduce((best, curr) => {
+              if (curr.clientId && !best.clientId) return curr
+              if (!curr.clientId && best.clientId) return best
+              return (curr.modifiedAt || '') > (best.modifiedAt || '') ? curr : best
+            })
+            // Delete other duplicates
+            for (const dup of duplicates) {
+              if (dup.id !== existing.id) {
+                await db.notes.delete(dup.id!)
+              }
+            }
+          }
         }
         const rec: NoteRecord = {
           id: existing?.id,
@@ -978,6 +998,12 @@ let syncRunning = false
 let backoffUntilMs = 0
 let lastSyncAtMs = 0
 let lastWSTriggerMs = 0
+let isSyncLeader = false
+let leaderHeartbeatInterval: number | null = null
+let lastLeaderHeartbeat = 0
+const LEADER_HEARTBEAT_INTERVAL_MS = 5000
+const LEADER_TIMEOUT_MS = 10000
+const TAB_ID = crypto.randomUUID()
 
 // Background control & cleanup handles
 let stopRequested = false
@@ -988,14 +1014,98 @@ let onFocus: (() => void) | null = null
 let onVisibilityChange: (() => void) | null = null
 let lastCleanup: (() => void) | null = null
 
+// Cross-tab sync coordination: only leader tab performs syncs
+function tryBecomeLeader(): boolean {
+  if (!syncBC) return true // Fallback if BroadcastChannel not available
+  if (isSyncLeader) return true
+  try {
+    syncBC.postMessage({ type: 'claim-leader', tabId: TAB_ID, timestamp: Date.now() })
+    // Give other tabs a moment to respond
+    setTimeout(() => {
+      if (!isSyncLeader) {
+        isSyncLeader = true
+        startLeaderHeartbeat()
+        try { syncBC?.postMessage({ type: 'leader-elected', tabId: TAB_ID }) } catch {}
+      }
+    }, 100)
+    return true
+  } catch {
+    return true // Fallback: allow sync if BC fails
+  }
+}
+
+function startLeaderHeartbeat(): void {
+  if (leaderHeartbeatInterval) return
+  leaderHeartbeatInterval = window.setInterval(() => {
+    if (isSyncLeader && syncBC) {
+      try {
+        lastLeaderHeartbeat = Date.now()
+        syncBC.postMessage({ type: 'leader-heartbeat', tabId: TAB_ID, timestamp: lastLeaderHeartbeat })
+      } catch {}
+    }
+  }, LEADER_HEARTBEAT_INTERVAL_MS)
+}
+
+function stopLeaderHeartbeat(): void {
+  if (leaderHeartbeatInterval) {
+    window.clearInterval(leaderHeartbeatInterval)
+    leaderHeartbeatInterval = null
+  }
+  if (isSyncLeader && syncBC) {
+    try { syncBC.postMessage({ type: 'leader-resigned', tabId: TAB_ID }) } catch {}
+    isSyncLeader = false
+  }
+}
+
 export async function runSync(force = false): Promise<void> {
   if (stopRequested) return
   const now = Date.now()
   if (!force && now < backoffUntilMs) return
   if (syncRunning) { syncQueued = true; return }
+  
+  // Only leader tab should sync, or if no leader exists, try to become one
+  if (!isSyncLeader && !force) {
+    // Check if we should try to become leader (no heartbeat received recently)
+    if (now - lastLeaderHeartbeat > LEADER_TIMEOUT_MS) {
+      tryBecomeLeader()
+    }
+    // If still not leader and not forced, queue and wait
+    if (!isSyncLeader) {
+      syncQueued = true
+      setTimeout(() => {
+        if (!isSyncLeader) {
+          tryBecomeLeader()
+          if (syncQueued) {
+            syncQueued = false
+            void runSync(force).catch(() => {})
+          }
+        }
+      }, 1000)
+      return
+    }
+  }
+  
   // Ensure IndexedDB is opened and schema is valid before any sync transactions.
   // This prevents "objectStore was not found" loops after deployments.
-  await ensureDbOpen().catch(() => {})
+  try {
+    await ensureDbOpen()
+  } catch (e: any) {
+    const msg = (e?.message || '').toString()
+    if (msg.includes('objectStore') || msg.includes('DB_SCHEMA') || msg.includes('NotFoundError')) {
+      // Schema mismatch - try to recover by ensuring DB is properly opened
+      try {
+        await ensureDbOpen()
+      } catch (recoverError: any) {
+        // If recovery fails, it's a serious schema issue - user should refresh
+        setSyncError('Database schema error - please refresh the page')
+        console.error('IndexedDB schema error:', recoverError)
+        return
+      }
+    } else {
+      throw e
+    }
+  }
+  
   syncRunning = true
   setSyncing(true)
   try {
@@ -1012,6 +1122,12 @@ export async function runSync(force = false): Promise<void> {
     const msg = (e?.message || '').toString()
     // Keep AUTH_REQUIRED as state, but still record as a sync error for debug/UX.
     setSyncError(msg || 'Sync failed')
+    // If it's an IndexedDB error, try to recover
+    if (msg.includes('objectStore') || msg.includes('NotFoundError')) {
+      try {
+        await ensureDbOpen()
+      } catch {}
+    }
     throw e
   } finally {
     syncRunning = false
@@ -1025,20 +1141,116 @@ export async function runSync(force = false): Promise<void> {
 
 export function scheduleAutoSync() {
   stopRequested = false
+  
+  // Setup cross-tab sync coordination
+  if (syncBC) {
+    syncBC.addEventListener('message', (msg: MessageEvent) => {
+      const data = msg.data
+      if (!data || data.tabId === TAB_ID) return
+      
+      if (data.type === 'claim-leader') {
+        // Another tab is claiming leadership - if we're leader, check if they're newer
+        if (isSyncLeader && data.timestamp && data.timestamp > lastLeaderHeartbeat) {
+          stopLeaderHeartbeat()
+        }
+      } else if (data.type === 'leader-elected') {
+        // Another tab became leader - stop trying
+        if (isSyncLeader && data.tabId !== TAB_ID) {
+          stopLeaderHeartbeat()
+        }
+      } else if (data.type === 'leader-heartbeat') {
+        // Update last heartbeat time
+        if (data.tabId !== TAB_ID && data.timestamp) {
+          lastLeaderHeartbeat = Math.max(lastLeaderHeartbeat, data.timestamp)
+          if (isSyncLeader) {
+            // Another leader exists - resign
+            stopLeaderHeartbeat()
+          }
+        }
+      } else if (data.type === 'leader-resigned') {
+        // Leader resigned - try to become new leader
+        if (!isSyncLeader && !stopRequested) {
+          tryBecomeLeader()
+        }
+      } else if (data.type === 'sync-request') {
+        // Another tab requests sync - if we're leader, trigger it
+        if (isSyncLeader) {
+          void runSync().catch(() => {})
+        }
+      }
+    })
+    
+    // Try to become leader on startup
+    tryBecomeLeader()
+  }
+  
   const kick = () => {
     if (syncTimer) window.clearTimeout(syncTimer)
-    syncTimer = window.setTimeout(() => { void runSync(true).catch(() => {}) }, DEBOUNCE_LOCAL_MS)
+    syncTimer = window.setTimeout(() => {
+      // Request sync from leader, or do it ourselves if we're leader
+      if (isSyncLeader) {
+        void runSync(true).catch(() => {})
+      } else if (syncBC) {
+        try { syncBC.postMessage({ type: 'sync-request', tabId: TAB_ID }) } catch {}
+      } else {
+        void runSync(true).catch(() => {})
+      }
+    }, DEBOUNCE_LOCAL_MS)
   }
 
-  onOnline = () => { void runSync().catch(() => {}) }
-  onFocus = () => { void runSync().catch(() => {}) }
-  onVisibilityChange = () => { if (document.visibilityState === 'visible') { void runSync().catch(() => {}) } }
+  onOnline = () => {
+    if (isSyncLeader) {
+      void runSync().catch(() => {})
+    } else if (syncBC) {
+      try { syncBC.postMessage({ type: 'sync-request', tabId: TAB_ID }) } catch {}
+    } else {
+      void runSync().catch(() => {})
+    }
+  }
+  onFocus = () => {
+    // On focus, try to become leader if no leader exists
+    if (!isSyncLeader && Date.now() - lastLeaderHeartbeat > LEADER_TIMEOUT_MS) {
+      tryBecomeLeader()
+    }
+    if (isSyncLeader) {
+      void runSync().catch(() => {})
+    } else if (syncBC) {
+      try { syncBC.postMessage({ type: 'sync-request', tabId: TAB_ID }) } catch {}
+    } else {
+      void runSync().catch(() => {})
+    }
+  }
+  onVisibilityChange = () => {
+    if (document.visibilityState === 'visible') {
+      if (!isSyncLeader && Date.now() - lastLeaderHeartbeat > LEADER_TIMEOUT_MS) {
+        tryBecomeLeader()
+      }
+      if (isSyncLeader) {
+        void runSync().catch(() => {})
+      } else if (syncBC) {
+        try { syncBC.postMessage({ type: 'sync-request', tabId: TAB_ID }) } catch {}
+      } else {
+        void runSync().catch(() => {})
+      }
+    } else {
+      // If tab becomes hidden and we're leader, consider resigning (but keep for a bit)
+      // This allows other tabs to take over if this one is closed
+    }
+  }
   window.addEventListener('online', onOnline)
   window.addEventListener('focus', onFocus)
   document.addEventListener('visibilitychange', onVisibilityChange)
 
-  // Periodic baseline sync
-  baselineIntervalId = window.setInterval(() => { void runSync().catch(() => {}) }, BASE_SYNC_INTERVAL_MS)
+  // Periodic baseline sync - only leader should do this
+  baselineIntervalId = window.setInterval(() => {
+    if (isSyncLeader) {
+      void runSync().catch(() => {})
+    } else if (syncBC) {
+      try { syncBC.postMessage({ type: 'sync-request', tabId: TAB_ID }) } catch {}
+    } else {
+      void runSync().catch(() => {})
+    }
+  }, BASE_SYNC_INTERVAL_MS)
 
   // Best-effort websocket to get nudges from server when other sessions push
   const connectWS = () => {
@@ -1056,7 +1268,14 @@ export function scheduleAutoSync() {
         const now = Date.now()
         if (now - lastWSTriggerMs < WS_COOLDOWN_MS) return
         lastWSTriggerMs = now
-        void runSync().catch(() => {})
+        // WebSocket messages should trigger sync in leader tab
+        if (isSyncLeader) {
+          void runSync().catch(() => {})
+        } else if (syncBC) {
+          try { syncBC.postMessage({ type: 'sync-request', tabId: TAB_ID }) } catch {}
+        } else {
+          void runSync().catch(() => {})
+        }
       }
       ws.onclose = () => {
         ws = null
@@ -1077,6 +1296,7 @@ export function scheduleAutoSync() {
   startJobWorker()
   const cleanup = () => {
     stopRequested = true
+    stopLeaderHeartbeat()
     if (syncTimer) { window.clearTimeout(syncTimer); syncTimer = null }
     if (jobTimer) { window.clearTimeout(jobTimer); jobTimer = null }
     if (baselineIntervalId) { window.clearInterval(baselineIntervalId); baselineIntervalId = null }
@@ -1221,6 +1441,7 @@ export async function getCurrentSpaceId(): Promise<number> {
 
 export function teardownSync(): void {
   stopRequested = true
+  stopLeaderHeartbeat()
   if (lastCleanup) {
     try { lastCleanup() } catch {}
     lastCleanup = null
